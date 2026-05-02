@@ -1,0 +1,139 @@
+{
+  "id": "checkout-502",
+  "description": "Coding-agent transcript for a checkout 502 investigation with logs, code, and traceback content.",
+  "labels": {
+    "must_preserve": [
+      "tool_use.input",
+      "tool_use.id",
+      "tool_result.tool_use_id",
+      "code_block",
+      "traceback"
+    ],
+    "should_compress": [
+      "log_dump",
+      "assistant_prose",
+      "user_prose"
+    ]
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Find the bug that's making checkouts return 502."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I'll grep the recent error logs.",
+          "tags": [
+            "assistant_prose"
+          ]
+        },
+        {
+          "type": "tool_use",
+          "id": "tu_001",
+          "name": "grep_logs",
+          "input": {
+            "pattern": "ERROR.*checkout",
+            "since": "30m"
+          },
+          "tags": [
+            "tool_use"
+          ]
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "tu_001",
+          "content": "2026-04-25T14:02:13Z ERROR checkout-api: payment_gateway timeout\n2026-04-25T14:02:14Z ERROR checkout-api: payment_gateway timeout\n2026-04-25T14:02:14Z ERROR checkout-api: payment_gateway timeout\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:02:15Z INFO routine heartbeat\n2026-04-25T14:03:01Z ERROR payment-gateway: connection pool exhausted",
+          "tags": [
+            "tool_result",
+            "log_dump"
+          ]
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Pool exhaustion. Let me view the config.",
+          "tags": [
+            "assistant_prose"
+          ]
+        },
+        {
+          "type": "tool_use",
+          "id": "tu_002",
+          "name": "read_file",
+          "input": {
+            "path": "payment-gateway/config/db.py"
+          },
+          "tags": [
+            "tool_use"
+          ]
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "tu_002",
+          "content": "```python\nDB_POOL_SIZE = 20  # raised from 5 in 2024\nDB_POOL_TIMEOUT = 5\nDB_QUERY_BUDGET = 7  # was 3 before deploy 2026-04-25 14:00\n```",
+          "tags": [
+            "tool_result",
+            "code_block"
+          ]
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "DB_QUERY_BUDGET went from 3 to 7 in today's deploy without raising DB_POOL_SIZE. Recommend raising pool size to 50 and adding an alert on pool saturation above 80%.",
+      "tags": [
+        "assistant_prose"
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Confirm the deploy SHA and the relevant traceback.",
+      "tags": [
+        "user_prose"
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Traceback (most recent call last):\n  File 'app.py', line 142, in process_payment\n    conn = pool.acquire(timeout=5)\n  File 'pool.py', line 87, in acquire\n    raise TimeoutError('pool exhausted after 5s')\nTimeoutError: pool exhausted after 5s",
+          "tags": [
+            "traceback"
+          ]
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Thanks. Summarize the fix in one paragraph.",
+      "tags": [
+        "user_prose"
+      ]
+    }
+  ],
+  "expected_invariants": {
+    "tool_linkage": true,
+    "tool_input_preserved": true,
+    "code_verbatim": true,
+    "traceback_verbatim": true,
+    "log_dump_shrinks": true
+  }
+}
