@@ -58,3 +58,6 @@ ts/package-lock.json
 
 # humanize plugin state (generated)
 .humanize/
+
+# Research scratch — not for distribution
+docs/research/

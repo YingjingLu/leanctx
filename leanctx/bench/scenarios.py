@@ -72,6 +72,7 @@ _BUILTIN_RUNNER_MODULES = (
     "leanctx.bench.runners.agent_structural",
     "leanctx.bench.runners.anthropic_e2e",
     "leanctx.bench.runners.lingua_local",
+    "leanctx.bench.runners.longbench_v2",
     "leanctx.bench.runners.selfllm_provider",
 )
 

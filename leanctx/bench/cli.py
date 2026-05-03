@@ -216,6 +216,7 @@ _EXTRA_PROBES: dict[str, str] = {
     "tokens": "tiktoken",
     "bench": "respx",
     "otel": "opentelemetry",
+    "longbench": "datasets",
 }
 
 

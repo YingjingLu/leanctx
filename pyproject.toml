@@ -46,6 +46,9 @@ tokens = ["tiktoken>=0.7"]
 # 'bench' is for users who want to run the integration_test_*.py
 # benchmark scripts. respx mocks provider HTTP so no API key is needed.
 bench = ["respx>=0.21.0"]
+# 'longbench' adds the public-benchmark dataset loader. Used by the
+# `leanctx bench run longbench-v2` scenario.
+longbench = ["datasets>=2.18.0"]
 # 'otel' enables OpenTelemetry spans + metrics. leanctx is API-only:
 # it never owns the SDK or exporter; the application is responsible for
 # configuring TracerProvider / MeterProvider / exporters.
@@ -62,6 +65,7 @@ all = [
     "respx>=0.21.0",
     "opentelemetry-api>=1.30,<2.0",
     "opentelemetry-sdk>=1.30,<2.0",
+    "datasets>=2.18.0",
 ]
 dev = [
     "pytest>=8.0",
@@ -123,6 +127,8 @@ module = [
     "langchain_core.*",
     "opentelemetry",
     "opentelemetry.*",
+    "datasets",
+    "datasets.*",
 ]
 ignore_missing_imports = true
 
