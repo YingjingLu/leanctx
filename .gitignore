@@ -61,3 +61,6 @@ ts/package-lock.json
 
 # Research scratch — not for distribution
 docs/research/
+
+# Bench-run scratch outputs (versioned snapshots live under docs/blog/data/)
+bench-results/

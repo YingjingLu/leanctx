@@ -6,11 +6,12 @@ Source: [docs/blog/v0.3-launch.md](v0.3-launch.md). All numbers below come from 
 
 **Title (≤ 80 chars):**
 
+> Show HN: leanctx – prompt compression that doubles accuracy on LongBench v2
+
+(Alternatives, in order of "lead with numbers" → "lead with the artifact":)
+
+> Show HN: leanctx 0.3 – 2× LongBench v2 accuracy vs naive truncation, 57% fewer tokens
 > Show HN: leanctx – drop-in prompt compression with OTel and a reproducible bench
-
-(Alternative if you want to lead with numbers:)
-
-> Show HN: leanctx 0.3 – 50% prompt token cuts on agent traffic, OTel spans included
 
 **URL:** `https://github.com/jia-gao/leanctx`
 
@@ -22,7 +23,7 @@ Source: [docs/blog/v0.3-launch.md](v0.3-launch.md). All numbers below come from 
 >
 > 2. **A `leanctx bench` CLI** with six named scenarios and versioned JSON output. Reproducible: `pip install 'leanctx[lingua,bench]' && leanctx bench run lingua-local --workload rag` gives you the same number I'd give you. The `agent-structural` scenario verifies five invariants on a coding-agent transcript (tool_use_id linkage, code blocks preserved verbatim, tracebacks preserved verbatim, tool input dicts unchanged, log spans compressed) and exits non-zero on any regression — so it's CI-gateable.
 >
-> Real numbers from the bench run earlier today: 51% token reduction on a 1.7 KB SRE-incident RAG document, 53% on an 8-turn chat, 50% on a 9-message coding-agent transcript with all 5 structural invariants green.
+> Real numbers from the bench run earlier today: 51% token reduction on a 1.7 KB SRE-incident RAG document, 53% on an 8-turn chat, 50% on a 9-message coding-agent transcript with all 5 structural invariants green. And on the public LongBench v2 leaderboard's short subset (15 items, Haiku eval, 20K truncation cap), leanctx-Lingua scored **40% vs baseline truncation's 20%** — doubling accuracy while removing 57% of tokens. The unintuitive bit: extractive compression keeps the answer-bearing tokens distributed across the document, naive head+tail truncation drops the middle where many answers live.
 >
 > Honest framing in the comparison table in the writeup: this isn't a replacement for Anthropic prompt caching (those target different windows of the prompt and compose), it's not LiteLLM (that's routing, not compression), and it's not Compresr (closed-weights hosted; leanctx runs the model locally). The honest gap vs naive LLMLingua-2 is the wrapper layer + classifier + tool-aware block handling.
 >
@@ -44,7 +45,7 @@ Source: [docs/blog/v0.3-launch.md](v0.3-launch.md). All numbers below come from 
 
 **Title (≤ 300 chars):**
 
-> [P] leanctx 0.3 — drop-in prompt compression for production LLM apps with OpenTelemetry spans + a reproducible bench CLI. 50% token reduction on a coding-agent workload with all 5 structural invariants preserved.
+> [P] leanctx 0.3 — drop-in prompt compression with OpenTelemetry observability + a reproducible bench. On LongBench v2 (short subset, Haiku eval), Lingua-based compression doubles baseline accuracy (40% vs 20%) while removing 57% of tokens.
 
 **Body:**
 
@@ -65,6 +66,16 @@ Source: [docs/blog/v0.3-launch.md](v0.3-launch.md). All numbers below come from 
 > | 9-msg coding agent | 846 → 423 tok | 50 % | 7.3 s |
 >
 > The agent-structural scenario additionally verifies that fenced code blocks, Python tracebacks, `tool_use_id` linkage, and tool-input dicts are preserved exactly. Status flips to failure with named invariants if any regress — works as a CI gate.
+>
+> **Public benchmark — LongBench v2** (`leanctx bench run longbench-v2`):
+>
+> | Method | Accuracy | Tokens kept | Notes |
+> |---|---:|---:|---|
+> | Baseline (head+tail truncation) | 20.0 % (3/15) | 100 % of 20K cap | Below random |
+> | leanctx Lingua (ratio=0.5) | **40.0 % (6/15)** | 43 % | **2× baseline; 57 % token cut** |
+> | leanctx SelfLLM (Haiku, ratio=0.3) | 26.7 % (4/15) | 1.4 % | Aggressive compression, signal loss |
+>
+> Subset: 15 short items, Haiku eval, 20K truncation (Anthropic key tier-limit). n=15 is directional; full 503-item sweep on the v0.3.x roadmap. The unintuitive finding: extractive compression keeps the answer-bearing tokens distributed across the document, while naive head+tail truncation drops the middle where many answers live.
 >
 > **Comparisons (honest):**
 >
@@ -144,7 +155,7 @@ LinkedIn rewards short + concrete. Three paragraphs max.
 
 **Post:**
 
-> Just shipped leanctx v0.3 — adds OpenTelemetry observability and a reproducible `leanctx bench` CLI to the prompt-compression library I've been working on. The headline number: 50% token reduction on a coding-agent transcript while preserving every code block, traceback, and tool-call linkage exactly. CI-gateable via the agent-structural bench scenario.
+> Just shipped leanctx v0.3 — adds OpenTelemetry observability and a reproducible `leanctx bench` CLI to the prompt-compression library I've been working on. The unintuitive headline: on the public LongBench v2 leaderboard's short subset (Haiku eval, 20K truncation), leanctx-Lingua compression doubles accuracy versus naive head+tail truncation (40% vs 20%) while removing 57% of tokens. Plus 50% token reduction on a coding-agent transcript with every code block, traceback, and tool-call linkage preserved exactly. CI-gateable via the agent-structural bench scenario.
 >
 > Two design choices worth flagging: (1) leanctx is API-only with respect to OTel — it never instantiates a TracerProvider or registers an exporter; your application owns the SDK. (2) The bench CLI emits versioned JSON (`schema_version: "1"`) so downstream tooling can consume it without breaking when the schema changes. Six named scenarios across offline + live-provider modes.
 >

@@ -22,6 +22,7 @@ existing CLI doesn't surface every dial as a flag):
     LEANCTX_LBV2_DOMAIN        = filter to one domain   (default: all)
     LEANCTX_LBV2_DIFFICULTY    = easy|hard              (default: all)
     LEANCTX_LBV2_LENGTH        = short|medium|long      (default: all)
+    LEANCTX_LBV2_REQUEST_DELAY = seconds between requests (default: 0)
 
 The runner emits one aggregate ``BenchRecord`` per invocation. When
 ``LEANCTX_LBV2_OUT`` is set, one JSONL row per question (id, domain,
@@ -94,8 +95,11 @@ def run(*, workload: str, **opts: object) -> BenchRecord:
     by_domain: dict[str, dict[str, int]] = {}
 
     t0_total = time.perf_counter()
+    delay_sec = float(cfg.get("request_delay_sec", 0))
     try:
-        for item in items:
+        for idx, item in enumerate(items):
+            if idx > 0 and delay_sec > 0:
+                time.sleep(delay_sec)
             t0 = time.perf_counter()
             context = item["context"]
             pre_tokens = _count_tokens(context)
@@ -215,6 +219,9 @@ def _load_config() -> dict[str, Any]:
         "length": os.environ.get("LEANCTX_LBV2_LENGTH", ""),
         "compressor_model": os.environ.get("LEANCTX_LBV2_COMPRESSOR_MODEL", ""),
         "max_tokens": int(os.environ.get("LEANCTX_LBV2_MAX_RESPONSE_TOKENS", "128")),
+        "request_delay_sec": float(
+            os.environ.get("LEANCTX_LBV2_REQUEST_DELAY", "0")
+        ),
     }
 
 
