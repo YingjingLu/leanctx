@@ -1,7 +1,7 @@
 # leanctx
 
 **Drop-in prompt compression for production LLM applications.**
-Cut your LLM token bill by 40–60% without changing your code.
+Cut your input-token bill by 40–60% — without changing your code.
 
 ```python
 # before
@@ -11,44 +11,149 @@ from openai import OpenAI
 from leanctx import OpenAI  # same interface, compressed requests
 ```
 
-Open-source models. No API keys to anyone but your existing provider.
-Your prompts and user data never leave your infrastructure by default.
+On the public **[LongBench v2](https://longbench2.github.io/)** leaderboard's short subset, leanctx-Lingua **doubles accuracy** versus naive head+tail truncation (40 % vs 20 %) while removing **57 % of tokens**. Open-source models, runs locally, MIT-licensed. Your prompts and user data never leave your infrastructure by default.
+
+[![PyPI](https://img.shields.io/pypi/v/leanctx)](https://pypi.org/project/leanctx/)
+[![Python](https://img.shields.io/pypi/pyversions/leanctx)](https://pypi.org/project/leanctx/)
+[![License](https://img.shields.io/pypi/l/leanctx)](LICENSE)
 
 ---
 
-> **Status:** v0.3 code is **feature-complete on `main`** — OTel observability
-> across 12 wrapper paths + reproducible `leanctx bench` CLI on top of v0.1
-> (drop-in wrappers + LLMLingua-2/SelfLLM compression) and v0.2 (multi-provider
-> SelfLLM + block-aware Lingua). Track progress in the [roadmap](#roadmap) below.
+## Quickstart (60 seconds)
 
-## Who this is for
+```bash
+pip install 'leanctx[anthropic,lingua]'    # or [openai], [gemini]
+```
+
+```python
+from leanctx import Anthropic
+
+client = Anthropic(
+    leanctx_config={
+        "mode": "on",
+        "trigger": {"threshold_tokens": 2000},
+        "routing": {"prose": "lingua"},  # route prose through LLMLingua-2
+    },
+)
+
+response = client.messages.create(
+    model="claude-sonnet-4-5",
+    max_tokens=512,
+    messages=[{"role": "user", "content": LONG_DOCUMENT}],
+)
+
+print(response.usage.leanctx_tokens_saved)  # e.g. 1841
+print(response.usage.leanctx_ratio)         # e.g. 0.49
+```
+
+> **First Lingua call loads ~1.2 GB of model weights** to `~/.cache/huggingface/`. Subsequent calls reuse the cache. Add `pip install 'leanctx[lingua]'` to opt in; without it, leanctx falls back to passthrough.
+
+Verify the install with no API key needed:
+
+```bash
+leanctx bench list                                   # 7 registered scenarios
+leanctx bench run agent-structural --workload agent  # 5 invariants enforced, exit 0 = pass
+```
+
+## Why this exists
 
 You're building a production LLM app and your token bill is a line item:
 
 - RAG apps with large retrieved documents
-- Long-running conversational agents
-- LangChain / LangGraph / CrewAI workflows with growing tool chains
+- Long-running conversational agents (LangChain / LangGraph / CrewAI)
 - Document-processing pipelines
-- Anything where input tokens accumulate and you pay for every one
+- Coding agents — Cursor-like / Claude-Code-like, with growing tool-call histories
 
-If your code calls a hosted LLM API in production and input tokens are a meaningful line item, this is for you.
+Existing options have gaps:
+
+- **Provider prompt caching** (Anthropic / OpenAI / Gemini) wins on stable prefixes — system prompts, tool definitions, retrieved-document pools. **It doesn't help with dynamic per-query content** (chat history, freshly retrieved docs, tool outputs). Compose with leanctx, don't choose between them.
+- **Naive truncation** drops the middle of the document, exactly where many answers live. The LongBench v2 numbers above show this concretely.
+- **Hosted compression APIs** (Compresr, Token Company) require sending your context to their servers. Closed-source models. leanctx is MIT-licensed, runs the model locally, and never makes outbound calls except to your existing provider.
+
+## Real numbers
+
+### Public benchmark — LongBench v2 (Tsinghua KEG, 503 questions, 8K–2M words)
+
+15-item short-subset ablation, Claude Haiku 4.5 eval, 20K head+tail truncation cap (rate-limit-friendly). Same model, same questions, same truncation across all three conditions — so the comparison is apples-to-apples. Full 503-item sweep is on the v0.3.x roadmap.
+
+| Method | Accuracy | Tokens kept | Reproduce |
+|---|---:|---:|---|
+| Baseline (head+tail truncation only) | 20.0 % (3/15) | 100 % of 20K cap | `leanctx bench run longbench-v2` |
+| **leanctx Lingua** (ratio=0.5) | **40.0 % (6/15)** | **43 %** | `LEANCTX_LBV2_COMPRESSOR=lingua leanctx bench run longbench-v2` |
+| leanctx SelfLLM (Haiku, ratio=0.3) | 26.7 % (4/15) | 1.4 % | `LEANCTX_LBV2_COMPRESSOR=selfllm leanctx bench run longbench-v2` |
+
+Lingua **doubles** the baseline accuracy while removing 57 % of tokens. Naive head+tail truncation drops the middle; Lingua's extractive token classifier keeps answer-bearing tokens distributed across the full document. Per-question records: [`docs/blog/data/lbv2-2026-05-03/`](docs/blog/data/lbv2-2026-05-03/).
+
+### Internal benchmark — coding-agent transcript
+
+A realistic 9-message agent transcript — user question, file reads, grep, log dumps, failed edit, error trace — totaling ~2.1K tokens. Run through `leanctx.Anthropic` with content-aware routing (code → verbatim, errors → verbatim, prose → Lingua):
+
+| Metric | Before | After | Reduction |
+|---|:-:|:-:|:-:|
+| Tokens | 2148 | 1384 | **35.6 %** |
+| Tokens saved per request | | | **768** |
+
+**What got preserved verbatim** (asserted programmatically by the `agent-structural` bench scenario):
+- A 2 KB Python source file inside a `tool_result` block — byte-identical
+- A Python traceback in an `is_error` tool result — byte-identical
+- Every `tool_use_id` and the `name` / `input` of every `tool_use` block — tool linkage and tool-call payloads untouched
+- `edit_file`'s `new_str` argument — the actual code edit isn't rewritten
+
+**What actually compressed:**
+- A 3.4 KB log dump shrank to 1.9 KB (45 % reduction) — the legitimate compression target
+- Grep results and prose reasoning blocks shrank by 30–50 %
+
+Reproduce: `leanctx bench run agent-structural --workload agent` — runs the real LLMLingua-2 model, ~30 s on Apple Silicon, no API key required. Status flips to `failure` with named invariants if any regress; CI-gateable.
+
+### SelfLLM cross-provider comparison
+
+Same 1.7 KB SRE-incident document through `SelfLLM` against each provider's cheapest tier:
+
+| Provider  | Model              | Compression | Latency   | Cost per call |
+|-----------|--------------------|:-----------:|:---------:|:-------------:|
+| Anthropic | `claude-haiku-4-5` | **41.6 %**  | 3.05 s    | ~$0.0016      |
+| OpenAI    | `gpt-4o-mini`      | **49.1 %**  | 6.42 s    | ~$0.0003      |
+| Gemini    | `gemini-2.5-flash` | **48.7 %**  | **2.25 s** ⚡ | ~$0.0001      |
+
+All three preserved every timestamp, metric value, and action item with no hallucination. Combined with `Lingua` (LLMLingua-2 local) hitting **44.7 %** char reduction on the same document at zero marginal cost, leanctx covers the full speed/cost/quality trade-off space.
+
+Full methodology, per-provider output samples, cost analysis, bugs found in flight: [`docs/benchmarks/`](docs/benchmarks/).
 
 ## How it works
 
-Three compression modes, one config switch:
+leanctx wraps your existing SDK call and applies a configurable compression pipeline before the request hits the wire.
 
-- **`local`** — runs Microsoft's open-source LLMLingua-2 locally. Free marginal cost.
-- **`self_llm`** — lets your own configured LLM do the compression. Highest quality.
-- **`hybrid`** (default) — routes by content type: code stays verbatim, prose goes through LLMLingua-2, long important spans fall back to self_llm.
+```
+your code
+   ↓
+leanctx.Anthropic / OpenAI / Gemini    ← drop-in wrapper
+   ↓
+Middleware (mode=on/off, threshold)
+   ↓
+Per-message pipeline:
+   classify (code | error | prose | …)
+        ↓
+   route to compressor:
+        Verbatim  — never touch (code, errors, tool calls)
+        Lingua    — LLMLingua-2 local, free marginal cost
+        SelfLLM   — your configured LLM (Anthropic/OpenAI/Gemini), highest quality
+   ↓
+real Anthropic / OpenAI / Gemini SDK → API
+```
 
-Content-aware routing means code blocks, diffs, stack traces, and tool schemas are preserved verbatim — no corrupted syntax.
+Two layers of config:
+
+- **`mode`** — `"on"` to compress, `"off"` to passthrough. Off is safe to leave deployed.
+- **`routing`** — maps content types (code / error / prose / unknown / long_important) to compressors (verbatim / lingua / selfllm).
+
+A fully-loaded production config:
 
 ```python
 from leanctx import OpenAI
 
 client = OpenAI(leanctx_config={
     "mode": "on",
-    "trigger": {"threshold_tokens": 2000},
+    "trigger": {"threshold_tokens": 2000},  # don't bother below this
     "routing": {
         "code":           "verbatim",   # never touch code
         "error":          "verbatim",   # never touch stack traces
@@ -57,111 +162,65 @@ client = OpenAI(leanctx_config={
     },
     "lingua":  {"ratio": 0.5, "device": "cpu"},
     "selfllm": {"model": "gpt-4o-mini", "api_key": "sk-...", "ratio": 0.3},
+    "observability": {"otel": True},     # opt-in OpenTelemetry
 })
-
-response = client.chat.completions.create(
-    model="gpt-4o",
-    max_tokens=1024,
-    messages=[{"role": "user", "content": long_document}],
-)
-
-# Compression telemetry attached to the response
-print(response.usage.leanctx_tokens_saved)
-print(response.usage.leanctx_ratio)
 ```
 
-## Real compression numbers
+## Compose with provider caching
 
-### Coding-agent workload (the main use case)
+leanctx is **complementary** to Anthropic / OpenAI / Gemini prompt caching, not competitive:
 
-A realistic 9-message agent transcript — user question, file reads, grep, log dumps, failed edit, error trace — totaling ~2.1K tokens. Run through `leanctx.Anthropic` with `mode="on"` and content-aware routing (code → verbatim, errors → verbatim, prose → Lingua):
+- **Provider caching wins** on stable prefixes: system prompts, tool definitions, retrieved-document pools that don't change across requests. Up to 90 % discount on cached reads.
+- **leanctx wins** on dynamic per-query content: chat history, freshly retrieved docs, tool outputs, log dumps that vary every call.
+- **They compose.** Mark your stable prefix with `cache_control` (provider-specific) and let leanctx compress the variable suffix. Both savings stack.
 
-| Metric | Before | After | Reduction |
-|---|:-:|:-:|:-:|
-| Tokens | 2148 | 1384 | **35.6%** |
-| Chars  | 7898 | 5701 | 27.8% |
-| Tokens saved per request | | | **768** |
-
-**What got preserved verbatim** (asserted programmatically):
-- ✅ A 2 KB Python source file inside a `tool_result` block — byte-identical
-- ✅ A Python traceback in an `is_error` tool result — byte-identical
-- ✅ Every `tool_use_id` and the `name` / `input` of every `tool_use` block — so tool linkage and tool calls don't break
-- ✅ `edit_file`'s `new_str` argument — so the actual code edit isn't rewritten
-
-**What actually compressed:**
-- A 3.4 KB log dump shrank to 1.9 KB (45% reduction) — the legitimate compression target
-- A grep result and prose reasoning blocks shrank by 30-50%
-
-Reproducible: `python scripts/integration_test_agent_workload.py` — runs the real LLMLingua-2 model, takes ~30s on Apple Silicon, no API key required.
-
-### SelfLLM cross-provider comparison
-
-Same 1.7 KB SRE-incident document through `SelfLLM` against each provider's cheapest tier:
-
-| Provider  | Model              | Compression | Latency | Cost per call |
-|-----------|--------------------|:-----------:|:-------:|:-------------:|
-| Anthropic | `claude-haiku-4-5` | **41.6%**   | 3.05s   | ~$0.0016      |
-| OpenAI    | `gpt-4o-mini`      | **49.1%**   | 6.42s   | ~$0.0003      |
-| Gemini    | `gemini-2.5-flash` | **48.7%**   | **2.25s** ⚡ | ~$0.0001      |
-
-All three preserved every timestamp, metric value, and action item with no hallucination. Combined with `Lingua` (LLMLingua-2 local) hitting **44.7% char reduction** on the same document at zero marginal cost, leanctx covers the full speed/cost/quality trade-off space.
-
-Full methodology, per-provider output samples, cost analysis, and bugs we found in flight: [`docs/benchmarks/`](docs/benchmarks/).
+The OTel telemetry leanctx emits includes a `provider` label that you can correlate with provider-side cache-hit metrics in the same dashboard.
 
 ## Observability (v0.3)
 
-leanctx emits OpenTelemetry spans and metrics for every compression call, opt-in via `leanctx_config`. The library is **API-only**: it never owns the OTel SDK or registers providers. The application configures OTel; leanctx emits.
+leanctx emits OpenTelemetry spans + metrics for every compression call, opt-in via `leanctx_config["observability"]["otel"]`. The library is **API-only**: it never owns the OTel SDK or registers providers. The application configures OTel; leanctx emits.
 
 ```python
 client = leanctx.Anthropic(
     leanctx_config={
         "mode": "on",
         "observability": {"otel": True},
-    }
+    },
 )
 ```
 
-Every wrapper-routed call produces one root `leanctx.compress` span with `provider`, `method`, `input_tokens`, `output_tokens`, `cost_usd`, and `duration_ms`, plus per-compressor child spans for granular tracing. Five metrics (4 counters + 1 histogram) are recorded with `provider`/`method`/`status` labels.
+Each wrapper-routed call produces one root `leanctx.compress` span (provider, method, input_tokens, output_tokens, cost_usd, duration_ms) plus per-compressor child spans. Five metrics — 4 counters + 1 histogram — labeled by `provider`/`method`/`status`. Closed `leanctx.method` taxonomy: `passthrough` | `below-threshold` | `empty` | `opaque-bailout` | `verbatim` | `lingua` | `selfllm` | `hybrid`.
 
-See [`docs/observability.md`](docs/observability.md) for the full attribute reference, span lifetime contract for streaming paths, sample app-side OTel SDK setup, and the closed `leanctx.method` taxonomy.
+See [`docs/observability.md`](docs/observability.md) for the full attribute reference, stream-lifetime contract, app-side OTel SDK setup, and cardinality guidance.
 
 ## Reproducible benchmarks (v0.3)
 
-The `leanctx bench` CLI runs the offline integration scenarios with deterministic input and emits versioned JSON records:
+The `leanctx bench` CLI ships seven named scenarios with versioned JSON output (`schema_version: "1"`):
 
 ```bash
-leanctx bench list                                  # registered scenarios
-leanctx bench run lingua-local --workload rag       # offline lingua compression
-leanctx bench run agent-structural --workload agent # 5 structural-integrity invariants enforced
-leanctx bench run anthropic-e2e --workload chat     # full stack, respx-mocked Anthropic
-leanctx bench run selfllm-anthropic --workload rag  # live API (requires ANTHROPIC_API_KEY)
+leanctx bench list                                  # show registered scenarios
+leanctx bench run lingua-local --workload rag       # offline, no API key
+leanctx bench run agent-structural --workload agent # 5 invariants enforced
+leanctx bench run anthropic-e2e --workload chat     # full stack, respx-mocked
+leanctx bench run selfllm-anthropic --workload rag  # live API, set ANTHROPIC_API_KEY
+leanctx bench run longbench-v2 --workload rag       # public LongBench v2 ablation
 ```
 
-Output is one JSON record per run with `schema_version: "1"` and a documented field set so downstream tooling can consume it.
-
-## Roadmap
-
-- [x] v0.1 — Python SDK, drop-in Anthropic/OpenAI/Gemini wrappers, `local` (LLMLingua-2) + `self_llm` (Anthropic), content classifier, router, dedup + purge-errors strategies, LangChain format helpers, Docker image
-- [x] v0.2 — `self_llm` on OpenAI + Gemini, block-aware compression (tool_use / tool_result preserved through Lingua), Gemini `contents` normalization (middleware actually runs), LangChain LCEL `compress_runnable`
-- [x] v0.3.0 PyPI publish — released 2026-04-26 ([pypi.org/project/leanctx/0.3.0](https://pypi.org/project/leanctx/0.3.0/))
-- [x] v0.3 — OTel observability (API-only spans + metrics on every compression call across 12 wrapper paths), `leanctx bench` CLI (6 named scenarios + versioned JSON schema)
-- [ ] v0.3.x — ghcr.io Docker publish workflow, OpenAI responses-API intercept, multimodal + function-call compression for Gemini, LlamaIndex helpers, TypeScript SDK compression port
-- [ ] v0.4 — Helm chart, Kubernetes sidecar proxy deployment, stateful session dedup with explicit session IDs
+Versioned schema, multi-run isolation (`--runs N` constructs fresh client/middleware each run), clean diagnostics for missing extras / API keys (exit 3, no traceback). Built so downstream tooling can consume the JSON without breaking on schema changes.
 
 ## Install
 
 ```bash
-# Once v0.1.0 is published:
-pip install leanctx
-pip install 'leanctx[anthropic,openai,gemini]'  # pick your providers
-pip install 'leanctx[lingua]'                   # + LLMLingua-2 local compression
-pip install 'leanctx[all]'                      # everything
-
-# Today (from source, main branch):
-pip install git+https://github.com/jia-gao/leanctx.git
+pip install leanctx                              # core (passthrough only — useful for testing the wrapper)
+pip install 'leanctx[anthropic,openai,gemini]'   # provider SDKs
+pip install 'leanctx[lingua]'                    # + LLMLingua-2 local compression (~1.2 GB on first call)
+pip install 'leanctx[otel]'                      # + OpenTelemetry API/SDK
+pip install 'leanctx[bench]'                     # + respx for offline scenarios
+pip install 'leanctx[longbench]'                 # + HuggingFace datasets for LongBench v2
+pip install 'leanctx[all]'                       # everything
 ```
 
-Docker images:
+Docker:
 
 ```bash
 docker build -t leanctx:slim .                             # 341 MB, all provider SDKs
@@ -170,36 +229,27 @@ docker build -t leanctx:lingua --build-arg LINGUA=true .   # + LLMLingua-2, ~3 G
 
 ## Supported providers
 
-| Provider | Drop-in client | Streaming | Compression applied | SelfLLM target |
+| Provider | Drop-in client | Streaming | Compression | SelfLLM target |
 |---|:-:|:-:|:-:|:-:|
-| Anthropic | ✅ `leanctx.Anthropic` / `AsyncAnthropic` | ✅ | ✅ | ✅ |
-| OpenAI    | ✅ `leanctx.OpenAI` / `AsyncOpenAI` | ✅ | ✅ | ✅ |
-| Gemini    | ✅ `leanctx.Gemini` (`.models` + `.aio.models`) | ✅ | ✅ * | ✅ |
+| Anthropic | `leanctx.Anthropic` / `AsyncAnthropic` | ✅ | ✅ | ✅ |
+| OpenAI    | `leanctx.OpenAI` / `AsyncOpenAI` | ✅ | ✅ | ✅ |
+| Gemini    | `leanctx.Gemini` (`.models` + `.aio.models`) | ✅ | ✅ \* | ✅ |
 
-**Gemini asterisk:** text-only requests compress fully. Requests that
-include `function_call`, `function_response`, or multimodal
-(`inline_data`) parts automatically bail out to passthrough — we
-never rewrite tool-call payloads, as that would change tool
-semantics. Multimodal + function-calling compression lands in v0.3.
+\* **Gemini text-only requests compress fully.** Requests that include `function_call`, `function_response`, or multimodal (`inline_data`) parts automatically bail out to passthrough — leanctx never rewrites tool-call payloads (would change tool semantics) and doesn't touch images. Multimodal + function-call compression is on the v0.3.x roadmap. Spans for these calls carry `leanctx.method = opaque-bailout` so you can monitor the share.
 
-## Architecture
+12 wrapper request paths instrumented (sync + async × stream + non-stream × 3 providers). Stream-path span lifetime closes at the first of: iterator exhaustion, explicit `.close()`, or `__del__` GC backstop — `duration_ms` covers the full stream lifetime.
 
-```
-your code
-   ↓
-leanctx.Anthropic / OpenAI / Gemini
-   ↓
-Middleware
-   ├── Strategies (deterministic, no LLM):
-   │     DedupStrategy, PurgeErrorsStrategy
-   ↓
-   ├── Per-message pipeline:
-   │     classify → router → compressor
-   ↓
-Compressor:  Verbatim | Lingua (LLMLingua-2) | SelfLLM (your LLM)
-   ↓
-real Anthropic / OpenAI / Gemini SDK → API
-```
+## Status
+
+[`v0.3.1`](https://github.com/jia-gao/leanctx/releases/tag/v0.3.1) is on PyPI. Built across a 5-round Codex-reviewed RLCR loop; 257 tests passing, ruff + mypy --strict clean across 40 source files.
+
+## Roadmap
+
+- [x] **v0.1** — Python SDK, drop-in wrappers, LLMLingua-2 + SelfLLM (Anthropic), classifier, router, dedup + purge-errors strategies, LangChain helpers, Docker
+- [x] **v0.2** — SelfLLM on OpenAI + Gemini, block-aware compression (tool_use / tool_result preserved), Gemini contents normalization, LCEL `compress_runnable`
+- [x] **v0.3** — OpenTelemetry observability across 12 wrapper paths, `leanctx bench` CLI (6 scenarios + versioned schema), `agent-structural` invariant enforcement, [public release `v0.3.1`](https://pypi.org/project/leanctx/) — 2026-04-26
+- [ ] **v0.3.x** — full 503-item LongBench v2 sweep, ghcr.io Docker publish, OpenAI Responses-API intercept, multimodal + function-call compression for Gemini, LlamaIndex helpers, TypeScript SDK compression port
+- [ ] **v0.4** — per-tenant attribution (with cardinality cap), Helm chart / K8s sidecar, stateful session dedup with explicit session IDs
 
 ## License
 
