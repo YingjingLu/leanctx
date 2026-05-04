@@ -22,13 +22,13 @@ On the public **[LongBench v2](https://longbench2.github.io/)** leaderboard's sh
 ## Quickstart (60 seconds)
 
 ```bash
-pip install 'leanctx[anthropic,lingua]'    # or [openai], [gemini]
+pip install 'leanctx[openai,lingua]'    # or [anthropic], [gemini]
 ```
 
 ```python
-from leanctx import Anthropic
+from leanctx import OpenAI
 
-client = Anthropic(
+client = OpenAI(
     leanctx_config={
         "mode": "on",
         "trigger": {"threshold_tokens": 2000},
@@ -36,8 +36,8 @@ client = Anthropic(
     },
 )
 
-response = client.messages.create(
-    model="claude-sonnet-4-5",
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
     max_tokens=512,
     messages=[{"role": "user", "content": LONG_DOCUMENT}],
 )
