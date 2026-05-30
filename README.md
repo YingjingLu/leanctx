@@ -217,8 +217,22 @@ pip install 'leanctx[lingua]'                    # + LLMLingua-2 local compressi
 pip install 'leanctx[otel]'                      # + OpenTelemetry API/SDK
 pip install 'leanctx[bench]'                     # + respx for offline scenarios
 pip install 'leanctx[longbench]'                 # + HuggingFace datasets for LongBench v2
+pip install 'leanctx[server]'                    # + FastAPI/uvicorn HTTP compression sidecar
 pip install 'leanctx[all]'                       # everything
 ```
+
+### HTTP sidecar (for non-Python callers)
+
+Run leanctx as a long-lived HTTP service so a TypeScript proxy, a LiteLLM callback, a Go gateway — any non-Python stack — can use leanctx compression over `POST /compress`:
+
+```bash
+pip install 'leanctx[server,lingua]'
+leanctx-serve --port 8459
+curl -s localhost:8459/compress -H 'content-type: application/json' \
+  -d '{"messages":[{"role":"user","content":"<long prose>"}]}'
+```
+
+It compresses `system`/`user`/`assistant` prose and forwards `tool` results + multimodal content verbatim, preserving message order/count. See [`docs/server.md`](docs/server.md).
 
 Docker:
 
