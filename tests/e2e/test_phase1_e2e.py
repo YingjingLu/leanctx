@@ -11,10 +11,7 @@ from __future__ import annotations
 import pytest
 
 from scripts.bench_clawtypeor_phase1 import (
-    GateResult,
-    apply_gate,
     compute_metrics,
-    format_report,
 )
 
 # ── Sprint 8 tests ─────────────────────────────────────────────────────────
@@ -95,7 +92,6 @@ def test_e2e_compute_metrics_produces_valid_delta(full_pipeline):
 @pytest.mark.e2e
 def test_e2e_report_written_to_disk(full_pipeline, tmp_path):
     """main() writes results.jsonl + report.md; report contains PASS or NO-GO."""
-    import sys
 
     from scripts.bench_clawtypeor_phase1 import main
 

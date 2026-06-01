@@ -7,7 +7,7 @@ All marked unit.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -57,10 +57,9 @@ def test_wait_for_health_raises_on_timeout():
     with (
         patch.object(harness, "health_check", return_value=False),
         patch.object(harness.time, "time", side_effect=[0, 100]),
-        patch.object(harness.time, "sleep"),
+        patch.object(harness.time, "sleep"),pytest.raises(TimeoutError, match="http://x")
     ):
-        with pytest.raises(TimeoutError, match="http://x"):
-            wait_for_health(None, "http://x", timeout=10)
+        wait_for_health(None, "http://x", timeout=10)
 
 
 # ── spawn_cr_shim tests ────────────────────────────────────────────────────

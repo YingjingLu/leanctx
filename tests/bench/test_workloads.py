@@ -9,8 +9,7 @@ from __future__ import annotations
 import pytest
 
 from leanctx.bench.workloads import load_workload
-from leanctx.tokens import count_tokens, count_message_tokens
-
+from leanctx.tokens import count_tokens
 
 # ---------------------------------------------------------------------------
 # Helpers

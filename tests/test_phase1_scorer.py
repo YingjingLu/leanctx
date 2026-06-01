@@ -17,12 +17,16 @@ from scripts.bench_clawtypeor_phase1 import (
 # ── Shared fixtures ────────────────────────────────────────────────────────
 
 RECORDS_A = [
-    {"leg": "A", "workload": "lb_s1", "tokens_raw": 10000, "tokens_compressed": 6000, "accuracy": True},
-    {"leg": "A", "workload": "lb_s1", "tokens_raw": 8000,  "tokens_compressed": 5000, "accuracy": False},
+    {"leg": "A", "workload": "lb_s1", "tokens_raw": 10000,
+     "tokens_compressed": 6000, "accuracy": True},
+    {"leg": "A", "workload": "lb_s1", "tokens_raw": 8000,
+     "tokens_compressed": 5000, "accuracy": False},
 ]
 RECORDS_B = [
-    {"leg": "B", "workload": "lb_s1", "tokens_raw": 10000, "tokens_compressed": 4500, "accuracy": True},
-    {"leg": "B", "workload": "lb_s1", "tokens_raw": 8000,  "tokens_compressed": 3500, "accuracy": False},
+    {"leg": "B", "workload": "lb_s1", "tokens_raw": 10000,
+     "tokens_compressed": 4500, "accuracy": True},
+    {"leg": "B", "workload": "lb_s1", "tokens_raw": 8000,
+     "tokens_compressed": 3500, "accuracy": False},
 ]
 
 # ── compute_metrics tests ──────────────────────────────────────────────────

@@ -28,7 +28,6 @@ from scripts.bench_clawtypeor_phase1 import (
     run_leg,
     setup_clawtypeor,
     spawn_cr_shim,
-    spawn_leanctx_sidecar,
     write_shim_file,
 )
 
