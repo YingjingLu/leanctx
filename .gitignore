@@ -64,3 +64,5 @@ docs/research/
 
 # Bench-run scratch outputs (versioned snapshots live under docs/blog/data/)
 bench-results/
+research/
+CLAUDE.md

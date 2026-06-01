@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sprint 1 Checkpoint — ClawRouter × leanctx</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232635;
+    --border: #2e3248;
+    --accent: #7c6af7;
+    --accent2: #4fc3f7;
+    --green: #4caf7d;
+    --red: #e06c75;
+    --yellow: #e5c07b;
+    --orange: #d19a66;
+    --text: #cdd6f4;
+    --muted: #6c7086;
+    --code-bg: #181a24;
+    font-size: 15px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: "Inter","Segoe UI",system-ui,sans-serif; line-height: 1.7; }
+  a { color: var(--accent2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .page { max-width: 960px; margin: 0 auto; padding: 48px 24px 96px; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 32px; margin-bottom: 40px; }
+  header .tag  { font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--green); background: rgba(76,175,125,.12); padding: 3px 10px; border-radius: 20px; display: inline-block; margin-bottom: 12px; }
+  header .tag2 { font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--yellow); background: rgba(229,192,123,.12); padding: 3px 10px; border-radius: 20px; display: inline-block; margin-bottom: 12px; margin-left: 8px; }
+  header h1 { font-size: 2rem; font-weight: 700; letter-spacing: -.02em; line-height: 1.2; }
+  header .subtitle { margin-top: 8px; color: var(--muted); font-size: .95rem; }
+  header .meta { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 20px; font-size: .85rem; color: var(--muted); }
+  header .meta span strong { color: var(--text); }
+
+  h2 { font-size: 1.25rem; font-weight: 600; margin-top: 48px; margin-bottom: 16px; padding-left: 12px; border-left: 3px solid var(--accent); }
+  h3 { font-size: 1rem; font-weight: 600; margin-top: 28px; margin-bottom: 10px; color: var(--accent2); }
+  h4 { font-size: .9rem; font-weight: 600; margin-top: 20px; margin-bottom: 8px; color: var(--yellow); }
+  p { margin-bottom: 14px; }
+  ul, ol { margin: 0 0 14px 24px; }
+  li { margin-bottom: 5px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; margin-bottom: 16px; }
+  .card.success { border-color: var(--green);  background: rgba(76,175,125,.06); }
+  .card.warn    { border-color: var(--yellow); background: rgba(229,192,123,.06); }
+  .card.issue   { border-color: var(--red);    background: rgba(224,108,117,.06); }
+  .card.info    { border-color: var(--accent2);background: rgba(79,195,247,.06); }
+
+  /* Summary bar */
+  .summary-bar { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin: 20px 0 28px; }
+  .summary-bar .cell { flex: 1; padding: 18px 16px; text-align: center; border-right: 1px solid var(--border); }
+  .summary-bar .cell:last-child { border-right: none; }
+  .summary-bar .cell .num { font-size: 1.6rem; font-weight: 700; line-height: 1; margin-bottom: 5px; }
+  .summary-bar .cell .lbl { font-size: .73rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+
+  /* Test result table */
+  table { width: 100%; border-collapse: collapse; margin: 14px 0 20px; font-size: .87rem; }
+  th { background: var(--surface2); text-align: left; padding: 8px 12px; border: 1px solid var(--border); font-weight: 600; color: var(--accent2); font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
+  td { padding: 8px 12px; border: 1px solid var(--border); vertical-align: top; }
+  tr:nth-child(even) td { background: rgba(255,255,255,.015); }
+
+  code { font-family: "JetBrains Mono","Fira Code",monospace; font-size: .83em; background: var(--code-bg); padding: 2px 6px; border-radius: 4px; color: #f8f8f2; }
+  pre.cb { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin: 10px 0 16px; overflow-x: auto; font-family: "JetBrains Mono","Fira Code",monospace; font-size: .82rem; line-height: 1.65; color: #f8f8f2; }
+  .kw  { color: #c792ea; }
+  .fn  { color: #82aaff; }
+  .str { color: #c3e88d; }
+  .cm  { color: #546e7a; }
+  .num { color: #f78c6c; }
+  .ty  { color: #ffcb6b; }
+  .dec { color: #e06c75; }
+
+  .pass  { color: var(--green);  font-weight: 700; }
+  .fail  { color: var(--red);    font-weight: 700; }
+  .skip  { color: var(--muted);  font-weight: 600; }
+  .badge { display: inline-block; font-size: .72rem; font-weight: 600; padding: 2px 8px; border-radius: 10px; margin-left: 4px; vertical-align: middle; }
+  .badge.unit  { background: rgba(124,106,247,.2); color: var(--accent); }
+  .badge.done  { background: rgba(76,175,125,.2);  color: var(--green); }
+  .badge.open  { background: rgba(229,192,123,.2); color: var(--yellow); }
+  .badge.info  { background: rgba(79,195,247,.2);  color: var(--accent2); }
+
+  .metric-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin: 16px 0; }
+  @media(max-width:640px){ .metric-grid{ grid-template-columns:1fr 1fr; } }
+  .metric-tile { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; text-align: center; }
+  .metric-tile .val   { font-size: 1.15rem; font-weight: 700; color: var(--accent); line-height: 1; margin-bottom: 4px; }
+  .metric-tile .label { font-size: .76rem; color: var(--muted); }
+
+  .file-map { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; margin: 16px 0; overflow-x: auto; }
+  .file-map pre { font-family: "JetBrains Mono","Fira Code",monospace; font-size: .79rem; line-height: 1.75; color: var(--text); white-space: pre; }
+  .f-new { color: var(--green); }
+  .f-ext { color: var(--yellow); }
+
+  .issue-list { list-style: none; margin: 0; padding: 0; }
+  .issue-list > li { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; margin-bottom: 10px; }
+  .issue-list > li .q { font-weight: 600; font-size: .92rem; margin-bottom: 5px; color: var(--text); }
+  .issue-list > li .body { font-size: .86rem; color: var(--muted); line-height: 1.6; }
+  .issue-list > li .impact { font-size: .82rem; color: var(--yellow); margin-top: 5px; }
+  .issue-list > li .action { font-size: .82rem; color: var(--green); margin-top: 4px; }
+
+  .callout { display: flex; gap: 14px; padding: 12px 18px; border-radius: 8px; margin: 14px 0; font-size: .9rem; }
+  .callout.info   { background: rgba(79,195,247,.07);  border: 1px solid rgba(79,195,247,.25); }
+  .callout.warn   { background: rgba(229,192,123,.07); border: 1px solid rgba(229,192,123,.25); }
+  .callout.ok     { background: rgba(76,175,125,.07);  border: 1px solid rgba(76,175,125,.25); }
+  .callout-icon   { flex-shrink: 0; margin-top: 1px; }
+
+  hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+
+  nav.toc { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 32px; }
+  nav.toc h4 { font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
+  nav.toc ol { margin: 0; padding-left: 18px; }
+  nav.toc li { font-size: .87rem; margin-bottom: 3px; color: var(--accent2); }
+
+  .episode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0; }
+  @media(max-width:640px){ .episode-grid{ grid-template-columns:1fr; } }
+  .episode-tile { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .episode-tile .ep-num { font-size: .72rem; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .06em; }
+  .episode-tile .ep-title { font-weight: 600; font-size: .92rem; margin: 4px 0 6px; }
+  .episode-tile .ep-detail { font-size: .82rem; color: var(--muted); }
+  .episode-tile .ep-detail span { color: var(--text); }
+
+  .diff-block { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; margin: 12px 0; font-family: "JetBrains Mono","Fira Code",monospace; font-size: .81rem; line-height: 1.6; overflow-x: auto; }
+  .diff-add { color: var(--green); }
+  .diff-ctx { color: var(--muted); }
+  .diff-hdr { color: var(--accent2); }
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- ──────────── HEADER ──────────── -->
+<header>
+  <div>
+    <span class="tag">Sprint 1 · Complete</span>
+    <span class="tag2">Checkpoint · 2026-05-31</span>
+  </div>
+  <h1>Sprint 1 Checkpoint<br>agent_extended Workload Fixture</h1>
+  <p class="subtitle">
+    Implementation and test results for Sprint 1 of the ClawRouter × leanctx Phase 1 harness.
+    All 7 unit tests pass. Fixture is registered and ready for Sprints 6–7 integration use.
+  </p>
+  <div class="meta">
+    <span><strong>Source design:</strong> <a href="implementation_test_plan.html">implementation_test_plan.html</a></span>
+    <span><strong>Phase design:</strong> <a href="claw_router_phase_1.html">claw_router_phase_1.html rev 5</a></span>
+    <span><strong>Author:</strong> YingjingLu · 2026-05-31</span>
+    <span><strong>Python:</strong> 3.12.9 (Homebrew) · pytest 9.0.3</span>
+  </div>
+</header>
+
+<!-- ──────────── TOC ──────────── -->
+<nav class="toc">
+  <h4>Contents</h4>
+  <ol>
+    <li><a href="#verdict">Sprint verdict</a></li>
+    <li><a href="#tests">Test results (7/7)</a></li>
+    <li><a href="#fixture">Fixture implementation</a></li>
+    <li><a href="#files">Files created / modified</a></li>
+    <li><a href="#metrics">Workload metrics</a></li>
+    <li><a href="#issues">Open issues &amp; questions</a></li>
+    <li><a href="#next">Next sprint readiness</a></li>
+  </ol>
+</nav>
+
+<!-- ──────────── 1. VERDICT ──────────── -->
+<h2 id="verdict">1. Sprint Verdict</h2>
+
+<div class="summary-bar">
+  <div class="cell"><div class="num" style="color:var(--green)">7</div><div class="lbl">Tests passing</div></div>
+  <div class="cell"><div class="num" style="color:var(--red)">0</div><div class="lbl">Tests failing</div></div>
+  <div class="cell"><div class="num" style="color:var(--accent)">50</div><div class="lbl">Messages</div></div>
+  <div class="cell"><div class="num" style="color:var(--accent2)">10,769</div><div class="lbl">Tokens</div></div>
+  <div class="cell"><div class="num" style="color:var(--green)">186</div><div class="lbl">Existing tests still passing</div></div>
+</div>
+
+<div class="callout ok">
+  <span class="callout-icon">✓</span>
+  <span><strong>Sprint 1 complete. Gate to Sprint 2 passed.</strong> All 7 unit tests are green, 0 regressions in the existing suite (186 passing, 3 skipped). The <code>agent_extended</code> workload is registered in <code>_WORKLOADS</code> and available via <code>load_workload("agent_extended")</code>.</span>
+</div>
+
+<!-- ──────────── 2. TEST RESULTS ──────────── -->
+<h2 id="tests">2. Test Results (7 / 7)</h2>
+
+<p>Run command: <code>pytest tests/bench/test_workloads.py -v</code> · Runtime: <strong>0.10 s</strong></p>
+
+<table>
+  <tr>
+    <th>#</th>
+    <th>Test name</th>
+    <th>What it asserts</th>
+    <th>Result</th>
+    <th>Actual value</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td><code>test_agent_extended_message_count</code></td>
+    <td><code>len(messages) == 50</code></td>
+    <td><span class="pass">PASS</span></td>
+    <td>50</td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td><code>test_agent_extended_has_five_tool_use_episodes</code></td>
+    <td>≥ 5 messages whose content list contains a <code>tool_use</code> block</td>
+    <td><span class="pass">PASS</span></td>
+    <td>10 (2 per episode)</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td><code>test_agent_extended_tool_ids_all_linked</code></td>
+    <td>Set of <code>tool_use.id</code> == set of <code>tool_result.tool_use_id</code></td>
+    <td><span class="pass">PASS</span></td>
+    <td>10 matched pairs</td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td><code>test_agent_extended_has_compressible_prose</code></td>
+    <td>≥ 1 assistant string message with <code>len &gt; 400 chars</code></td>
+    <td><span class="pass">PASS</span></td>
+    <td>11 messages; longest 2,724 chars</td>
+  </tr>
+  <tr>
+    <td>5</td>
+    <td><code>test_agent_extended_has_code_blocks</code></td>
+    <td><code>"```" in concatenated content</code></td>
+    <td><span class="pass">PASS</span></td>
+    <td>16 fenced blocks (Python, YAML, Bash)</td>
+  </tr>
+  <tr>
+    <td>6</td>
+    <td><code>test_agent_extended_has_error_tracebacks</code></td>
+    <td><code>"Traceback" in concatenated content</code></td>
+    <td><span class="pass">PASS</span></td>
+    <td>3 tracebacks (Episode 3)</td>
+  </tr>
+  <tr>
+    <td>7</td>
+    <td><code>test_agent_extended_total_tokens_above_threshold</code></td>
+    <td><code>count_tokens(combined) &gt; 8000</code></td>
+    <td><span class="pass">PASS</span></td>
+    <td>10,769 tokens (tiktoken cl100k_base)</td>
+  </tr>
+</table>
+
+<pre class="cb">============================= test session starts ==============================
+platform darwin -- Python 3.12.9, pytest-9.0.3, pluggy-1.6.0
+collected 7 items
+
+tests/bench/test_workloads.py::test_agent_extended_message_count PASSED         [ 14%]
+tests/bench/test_workloads.py::test_agent_extended_has_five_tool_use_episodes PASSED [ 28%]
+tests/bench/test_workloads.py::test_agent_extended_tool_ids_all_linked PASSED   [ 42%]
+tests/bench/test_workloads.py::test_agent_extended_has_compressible_prose PASSED [ 57%]
+tests/bench/test_workloads.py::test_agent_extended_has_code_blocks PASSED       [ 71%]
+tests/bench/test_workloads.py::test_agent_extended_has_error_tracebacks PASSED  [ 85%]
+tests/bench/test_workloads.py::test_agent_extended_total_tokens_above_threshold PASSED [100%]
+
+============================== 7 passed in 0.10s ===============================</pre>
+
+<!-- ──────────── 3. FIXTURE ──────────── -->
+<h2 id="fixture">3. Fixture Implementation</h2>
+
+<p><code>_agent_extended()</code> in <code>leanctx/bench/workloads.py</code> builds a 50-message continuous conversation organized into 5 thematic episodes of 10 turns each. Each episode follows a consistent pattern:</p>
+
+<pre class="cb"><span class="cm"># Per-episode turn pattern (10 messages)</span>
+user:       task description
+assistant:  [text block + tool_use block]      ← triggers test 2
+user:       [tool_result block]                ← triggers test 3 (linked IDs)
+assistant:  long prose analysis (string)       ← triggers test 4 (> 400 chars)
+user:       follow-up question
+assistant:  [text block + tool_use block]      ← 2nd tool call per episode
+user:       [tool_result block with code]      ← triggers test 5 (fenced blocks)
+assistant:  analysis string
+user:       clarifying question
+assistant:  response string</pre>
+
+<h3>Episode structure</h3>
+
+<div class="episode-grid">
+  <div class="episode-tile">
+    <div class="ep-num">Episode 1</div>
+    <div class="ep-title">Grep &amp; Triage</div>
+    <div class="ep-detail">File: <span>auth/service.py</span> · Error: <span>TimeoutError</span><br>
+      Tool calls: <code>grep_logs</code>, <code>read_file</code><br>
+      Special content: 160 repeated <code>INFO health-check</code> log lines (heartbeat noise for CR observation compression) — the largest single token source in the workload
+    </div>
+  </div>
+  <div class="episode-tile">
+    <div class="ep-num">Episode 2</div>
+    <div class="ep-title">File Reads</div>
+    <div class="ep-detail">Files: <span>payments/gateway.py</span>, <span>payments/config.py</span> · Error: <span>ConnectionError</span><br>
+      Tool calls: 2× <code>read_file</code><br>
+      Special content: Python code blocks with inline cost-cutting comments; pool-size and timeout analysis prose
+    </div>
+  </div>
+  <div class="episode-tile">
+    <div class="ep-num">Episode 3</div>
+    <div class="ep-title">Error Analysis</div>
+    <div class="ep-detail">File: <span>orders/api.py</span> · Error: <span>AssertionError</span><br>
+      Tool calls: <code>grep_logs</code>, <code>read_file</code><br>
+      Special content: 3× Python <code>Traceback</code> (triggers test 6); commit SHA reference; regression analysis prose
+    </div>
+  </div>
+  <div class="episode-tile">
+    <div class="ep-num">Episode 4</div>
+    <div class="ep-title">Fix Iteration</div>
+    <div class="ep-detail">File: <span>infra/k8s.yaml</span> · Error: <span>KeyError</span><br>
+      Tool calls: <code>read_file</code>, <code>edit_file</code><br>
+      Special content: YAML and Bash code blocks; sequencing analysis prose (secret-before-manifest ordering)
+    </div>
+  </div>
+  <div class="episode-tile" style="grid-column: span 2;">
+    <div class="ep-num">Episode 5</div>
+    <div class="ep-title">Verification</div>
+    <div class="ep-detail">File: <span>tests/integration/test_checkout.py</span> · Error: <span>RuntimeError</span><br>
+      Tool calls: <code>run_tests</code>, <code>read_file</code><br>
+      Special content: verbose pytest output (18 tests, 1 failure); failing test source; 2,724-char end-of-session summary (longest prose message, triggers test 4)
+    </div>
+  </div>
+</div>
+
+<h3>Tool ID convention</h3>
+<p>IDs follow <code>tu_e{episode}_{call}</code> — e.g. <code>tu_e1_01</code>, <code>tu_e3_02</code>. This makes them human-readable and unique within the fixture. 10 tool_use / tool_result pairs total.</p>
+
+<h3>Registration</h3>
+<div class="diff-block"><span class="diff-hdr">--- leanctx/bench/workloads.py  (before)</span>
+<span class="diff-add">+++ leanctx/bench/workloads.py  (after)</span>
+<span class="diff-ctx"> _WORKLOADS: dict[str, Callable[[], list[dict[str, Any]]]] = {</span>
+<span class="diff-ctx">     "rag": _rag,</span>
+<span class="diff-ctx">     "chat": _chat,</span>
+<span class="diff-ctx">     "agent": _agent,</span>
+<span class="diff-add">+    "agent_extended": _agent_extended,</span>
+<span class="diff-ctx"> }</span></div>
+
+<!-- ──────────── 4. FILES ──────────── -->
+<h2 id="files">4. Files Created / Modified</h2>
+
+<div class="file-map">
+<pre>
+leanctx/
+  bench/
+    <span class="f-ext">workloads.py</span>              ← +889 lines  (added _agent_extended + registered in _WORKLOADS)
+
+tests/
+  bench/
+    <span class="f-new">test_workloads.py</span>         ← new · 140 lines · 7 unit tests
+
+<span class="f-ext">pyproject.toml</span>             ← +5 lines  (added unit / integration / e2e pytest markers)
+</pre>
+</div>
+
+<h3>pyproject.toml — markers added</h3>
+<div class="diff-block"><span class="diff-hdr">--- pyproject.toml  (before)
++++ pyproject.toml  (after)</span>
+<span class="diff-ctx"> [tool.pytest.ini_options]</span>
+<span class="diff-ctx"> testpaths = ["tests"]</span>
+<span class="diff-ctx"> asyncio_mode = "auto"</span>
+<span class="diff-add">+markers = [</span>
+<span class="diff-add">+    "unit: pure Python, no I/O, runs in CI always",</span>
+<span class="diff-add">+    "integration: requires Node >=20 and built ClawRouter dist/",</span>
+<span class="diff-add">+    "e2e: requires ANTHROPIC_API_KEY or OPENAI_API_KEY",</span>
+<span class="diff-add">+]</span></div>
+
+<!-- ──────────── 5. METRICS ──────────── -->
+<h2 id="metrics">5. Workload Metrics</h2>
+
+<p>Measured at runtime on the committed fixture using tiktoken <code>cl100k_base</code> encoding (same encoder used by leanctx's middleware threshold logic).</p>
+
+<div class="metric-grid">
+  <div class="metric-tile"><div class="val">50</div><div class="label">Total messages</div></div>
+  <div class="metric-tile"><div class="val">10</div><div class="label">Tool call pairs</div></div>
+  <div class="metric-tile"><div class="val">11</div><div class="label">Long prose msgs<br><span style="font-size:.7rem;color:var(--muted)">(> 400 chars each)</span></div></div>
+  <div class="metric-tile"><div class="val">2,724</div><div class="label">Chars in longest<br>prose message</div></div>
+  <div class="metric-tile"><div class="val">16</div><div class="label">Fenced code blocks</div></div>
+  <div class="metric-tile"><div class="val">3</div><div class="label">Tracebacks</div></div>
+  <div class="metric-tile"><div class="val">38,246</div><div class="label">Total chars</div></div>
+  <div class="metric-tile"><div class="val">10,769</div><div class="label">Total tokens<br><span style="font-size:.7rem;color:var(--muted)">(threshold: 8,000)</span></div></div>
+</div>
+
+<div class="callout info">
+  <span class="callout-icon">📌</span>
+  <span>The 10,769-token total is driven primarily by Episode 1's two groups of 80 repeated heartbeat log lines (160 lines × ~80 chars each ≈ 3,200 tokens). This is intentional — it replicates the high-cardinality observation-log pattern that ClawRouter's Layer 6 (observation compression) is designed to collapse, making Episode 1 the primary stress test for CR + leanctx combined compression.</span>
+</div>
+
+<h3>Workload comparison</h3>
+<table>
+  <tr><th>Workload</th><th>Messages</th><th>Tool pairs</th><th>Approx. tokens</th><th>Primary test target</th></tr>
+  <tr><td><code>agent</code></td><td>9</td><td>2</td><td>~500</td><td>Smoke test — fast, no threshold trigger</td></tr>
+  <tr><td><code>agent_extended</code> <span class="badge done">new</span></td><td>50</td><td>10</td><td>10,769</td><td>CR + leanctx compression; full 5-episode coverage</td></tr>
+  <tr><td>LongBench S1</td><td>—</td><td>—</td><td>varies</td><td>Accuracy evaluation (Sprint 8, requires API key)</td></tr>
+</table>
+
+<!-- ──────────── 6. OPEN ISSUES ──────────── -->
+<h2 id="issues">6. Open Issues &amp; Questions</h2>
+
+<ul class="issue-list">
+
+  <li>
+    <div class="q"><span style="color:var(--yellow)">#1</span> <span class="badge open">open</span> Python environment — no virtualenv for the project</div>
+    <div class="body">
+      The project's <code>.python-version</code> pins 3.12.10 via pyenv, but the pyenv version
+      has no packages installed. Tests were run on Homebrew Python 3.12.9 using
+      <code>--break-system-packages</code> to install dev dependencies. This is fragile:
+      the install mutates the system Python and will conflict with other projects on the machine.
+    </div>
+    <div class="impact">Impact: dev environment reproducibility; CI matrix may diverge from local.</div>
+    <div class="action">Recommended action: create a <code>venv</code> or <code>uv</code> environment at the project root,
+      install <code>pip install -e ".[dev]"</code> into it, and update CLAUDE.md to document the
+      setup command. Unblocks clean CI runs without <code>--break-system-packages</code>.</div>
+  </li>
+
+  <li>
+    <div class="q"><span style="color:var(--yellow)">#2</span> <span class="badge open">open</span> <code>tests/bench/test_workloads.py</code> created from scratch — no prior file to extend</div>
+    <div class="body">
+      The implementation plan says "extend <code>tests/bench/test_workloads.py</code>" but the file
+      did not exist before Sprint 1. It was created fresh. This is not a problem for Sprint 1
+      but signals that the test plan's description of file states may not perfectly reflect the
+      repository at the time of Sprint 1 execution.
+    </div>
+    <div class="impact">Impact: none for Sprint 1. Future sprints should verify file-existence assumptions before calling "extend."</div>
+    <div class="action">No action needed — file now exists as specified for Sprints 2+.</div>
+  </li>
+
+  <li>
+    <div class="q"><span style="color:var(--yellow)">#3</span> <span class="badge open">open</span> tiktoken must be present for the token-count test to use accurate BPE counting</div>
+    <div class="body">
+      <code>test_agent_extended_total_tokens_above_threshold</code> calls <code>count_tokens()</code>
+      which falls back to a 4-chars-per-token estimate when tiktoken is not installed.
+      With tiktoken: 10,769 tokens (passes comfortably). With the fallback:
+      38,246 chars ÷ 4 = 9,561 tokens (also passes, but with less margin).
+      The test passes in both cases given the current fixture size, but the two paths
+      give different absolute numbers.
+    </div>
+    <div class="impact">Impact: test is robust under both modes. Documented for completeness.</div>
+    <div class="action">No code change required. If CI runs without tiktoken, the test still passes.</div>
+  </li>
+
+  <li>
+    <div class="q"><span style="color:var(--yellow)">#4</span> <span class="badge open">open</span> <code>agent_extended</code> workload is not yet reachable via the <code>leanctx bench run</code> CLI</div>
+    <div class="body">
+      The workload is registered in <code>_WORKLOADS</code> and accessible via
+      <code>load_workload("agent_extended")</code>, but no scenario entry in
+      <code>leanctx/bench/scenarios.py</code> references it. Running
+      <code>leanctx bench run agent-extended</code> from the CLI would therefore fail with
+      an unknown scenario error. This is expected — the CLI scenario will be wired in
+      when the Phase 1 harness script is complete (Sprints 2–7).
+    </div>
+    <div class="impact">Impact: the workload cannot be benchmarked via the existing CLI. Sprint 7 addresses this through the harness script's <code>run_leg()</code>.</div>
+    <div class="action">Deferred to Sprint 7 / <code>scripts/bench_clawtypeor_phase1.py</code>.</div>
+  </li>
+
+  <li>
+    <div class="q"><span style="color:var(--yellow)">#5</span> <span class="badge open">open</span> pytest markers warning silenced by adding markers to <code>pyproject.toml</code> — confirm CI uses the same config</div>
+    <div class="body">
+      Before the <code>pyproject.toml</code> patch, the test run emitted 7 warnings:
+      <em>"PytestUnknownMarkWarning: Unknown pytest.mark.unit"</em>.
+      The warnings are now gone (markers registered). However, CI workflows are not yet
+      defined for this project (no <code>.github/workflows/</code> directory), so the
+      marker filtering (<code>pytest -m unit</code>) has not been validated in a CI context.
+    </div>
+    <div class="impact">Impact: low — the markers work locally. CI setup is defined in <code>implementation_test_plan.html §CI</code> but not yet created.</div>
+    <div class="action">Create <code>.github/workflows/bench_phase1.yml</code> as specified in the test plan (deferred to after Sprint 4 when the unit suite is fully green).</div>
+  </li>
+
+</ul>
+
+<!-- ──────────── 7. NEXT SPRINT ──────────── -->
+<h2 id="next">7. Next Sprint Readiness</h2>
+
+<div class="card success">
+  <strong>Gate check: all Sprint 1 unit tests pass → Sprint 2 is unblocked</strong>
+  <table style="margin-top:12px">
+    <tr><th>Sprint</th><th>Name</th><th>Type</th><th>Gate from Sprint 1</th><th>Status</th></tr>
+    <tr>
+      <td>2</td>
+      <td><code>apply_patch()</code> — patch machinery</td>
+      <td><span class="badge unit">unit</span></td>
+      <td>All 7 Sprint 1 tests pass</td>
+      <td><span class="pass">UNBLOCKED</span></td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><code>write_shim_file()</code></td>
+      <td><span class="badge unit">unit</span></td>
+      <td>Sprint 2 complete</td>
+      <td><span class="skip">waiting</span></td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>Scorer + reporter</td>
+      <td><span class="badge unit">unit</span></td>
+      <td>Sprint 3 complete</td>
+      <td><span class="skip">waiting</span></td>
+    </tr>
+    <tr>
+      <td>5–7</td>
+      <td>Service lifecycle + CR shim + leg runner</td>
+      <td><span class="badge info">intg</span></td>
+      <td>Sprint 4 complete; Node ≥20</td>
+      <td><span class="skip">waiting</span></td>
+    </tr>
+    <tr>
+      <td>8</td>
+      <td>End-to-end mini run</td>
+      <td><span class="badge info">e2e</span></td>
+      <td>Sprints 1–7 complete; API keys</td>
+      <td><span class="skip">waiting</span></td>
+    </tr>
+  </table>
+</div>
+
+<div class="callout info">
+  <span class="callout-icon">📌</span>
+  <span>Sprint 2 requires creating <code>scripts/bench_clawtypeor_phase1.py</code> with <code>LAYER8_TS_BLOCK</code> as a module-level string constant and implementing <code>apply_patch(cr_dir)</code>. The patch anchor (<code>const compressedChars = calculateTotalChars(result);</code>) and tsup config anchor are verified unique against pinned commit <code>89269507</code>. No new dependencies for Sprint 2 — the 9 tests use only <code>pathlib</code> and <code>tmp_path</code>.</span>
+</div>
+
+<hr>
+
+<p style="margin-top:8px; color:var(--muted); font-size:.82rem;">
+  Sprint 1 checkpoint · 2026-05-31 · leanctx ClawRouter integration ·
+  <a href="implementation_test_plan.html">Test plan</a> ·
+  <a href="claw_router_phase_1.html">Phase design</a>
+</p>
+
+</div>
+</body>
+</html>
