@@ -621,8 +621,8 @@ def _extract_lb_answer(response: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _lb_head_tail(text: str, max_chars: int = 60_000) -> str:
-    """Keep first + last quarter when text exceeds max_chars."""
+def _lb_head_tail(text: str, max_chars: int = 112_000) -> str:
+    """Truncate to ~28K tokens (112K chars ≈ 4 chars/token) to fit 30K tok/min rate limit."""
     if len(text) <= max_chars:
         return text
     half = max_chars // 2
@@ -711,30 +711,42 @@ def call_eval_llm(
     model = eval_cfg.get("model", "claude-sonnet-4-6")
     max_tokens = int(eval_cfg.get("max_tokens", 64))
 
-    if provider == "anthropic":
-        import anthropic
+    max_retries = 8
+    for attempt in range(max_retries):
+        try:
+            if provider == "anthropic":
+                import anthropic
 
-        client = anthropic.Anthropic()
-        resp = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = resp.content[0].text if resp.content else ""
-        in_tok = int(resp.usage.input_tokens)
-    elif provider == "openai":
-        import openai
+                client = anthropic.Anthropic()
+                resp = client.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                text = resp.content[0].text if resp.content else ""
+                in_tok = int(resp.usage.input_tokens)
+            elif provider == "openai":
+                import openai
 
-        client = openai.OpenAI()
-        resp = client.chat.completions.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = resp.choices[0].message.content or ""
-        in_tok = int(resp.usage.prompt_tokens) if resp.usage else 0
-    else:
-        raise ValueError(f"Unsupported eval provider: {provider!r}")
+                client = openai.OpenAI()
+                resp = client.chat.completions.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                text = resp.choices[0].message.content or ""
+                in_tok = int(resp.usage.prompt_tokens) if resp.usage else 0
+            else:
+                raise ValueError(f"Unsupported eval provider: {provider!r}")
+            break  # success
+        except Exception as exc:
+            is_rate_limit = "rate_limit" in type(exc).__name__.lower() or "429" in str(exc)
+            if is_rate_limit and attempt < max_retries - 1:
+                wait = min(2 ** attempt * 15, 120)  # 15s, 30s, 60s, 120s…
+                print(f"  [rate-limit] waiting {wait}s before retry {attempt + 2}/{max_retries}")
+                time.sleep(wait)
+            else:
+                raise
 
     return _extract_lb_answer(text), in_tok
 
@@ -826,7 +838,7 @@ def main(argv: list[str] | None = None) -> int:
     eval_cfg: dict[str, Any] = {
         "provider": args.eval_provider,
         "model": args.eval_model,
-        "max_tokens": 64,
+        "max_tokens": 1024,
     }
 
     # ── Phase A: Setup ────────────────────────────────────────────────────
