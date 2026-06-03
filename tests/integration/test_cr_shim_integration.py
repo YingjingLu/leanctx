@@ -2,7 +2,7 @@
 
 All tests marked integration. Require Node >=20 and built ClawRouter dist/.
 The session fixture clones + builds ClawRouter once (~60-90 s first run;
-cached in /tmp/clawtypeor_intg_test on subsequent runs).
+cached in /tmp/clawrouter_intg_test on subsequent runs).
 
 Key CR behaviour discovered during Sprint 6:
 - Whitespace compression triggers on content with multiple spaces.

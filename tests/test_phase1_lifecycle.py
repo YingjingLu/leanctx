@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import scripts.bench_clawtypeor_phase1 as harness
-from scripts.bench_clawtypeor_phase1 import (
+import benchmarks.clawrouter.bench_phase1 as harness
+from benchmarks.clawrouter.bench_phase1 import (
     health_check,
     spawn_cr_shim,
     spawn_leanctx_sidecar,

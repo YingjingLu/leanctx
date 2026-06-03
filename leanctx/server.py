@@ -248,6 +248,15 @@ def main() -> int:
         )
         return 1
 
+    # Surface leanctx INFO logs (e.g. the resolved Lingua device) alongside
+    # uvicorn's own output; without this the leanctx.* loggers stay silent.
+    import logging as _logging
+
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     uvicorn.run(
         "leanctx.server:app",
         host=args.host,

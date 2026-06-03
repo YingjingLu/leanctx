@@ -174,9 +174,21 @@ class GateResult:
     fail_reason: str = ""
 
 
+def _percentile(values: list[float], q: float) -> float | None:
+    """Nearest-rank percentile (q in [0, 1]); None for an empty sample."""
+    if not values:
+        return None
+    s = sorted(values)
+    if len(s) == 1:
+        return float(s[0])
+    idx = min(int(round(q * (len(s) - 1))), len(s) - 1)
+    return float(s[idx])
+
+
 def compute_metrics(
     records_a: list[dict[str, Any]],
     records_b: list[dict[str, Any]],
+    records_cb: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     tokens_a = sum(r["tokens_compressed"] for r in records_a)
     tokens_b = sum(r["tokens_compressed"] for r in records_b)
@@ -195,17 +207,28 @@ def compute_metrics(
     acc_b = sum(acc_b_vals) / len(acc_b_vals) if acc_b_vals else 0.0
     delta_accuracy = acc_b - acc_a
 
+    # Closed-book control: accuracy when the model answers from priors alone.
+    # If Leg A/B accuracy is at or below this, the context did no work and the
+    # "compression preserved information" claim is unsupported.
+    cb_vals = [
+        r["accuracy"]
+        for r in (records_cb or [])
+        if r.get("accuracy") is not None
+    ]
+    acc_closed_book: float | None = (
+        sum(cb_vals) / len(cb_vals) if cb_vals else None
+    )
+
     # $15 / 1M input tokens (Sonnet price) × 1K conversations
     cost_saved_per_1k = delta_tokens * avg_raw * (15 / 1e6) * 1000
 
-    durations_b = [r["duration_ms"] for r in records_b if r.get("duration_ms") is not None]
-    sidecar_p50_ms: float | None = None
-    if durations_b:
-        sorted_d = sorted(durations_b)
-        mid = len(sorted_d) // 2
-        sidecar_p50_ms = (
-            sorted_d[mid] if len(sorted_d) % 2 else (sorted_d[mid - 1] + sorted_d[mid]) / 2
-        )
+    # Sidecar (Layer 8) latency is the compression call in isolation, taken
+    # from Leg B records (the only leg with the sidecar in the path). The eval
+    # LLM time is reported separately and never folded into this figure.
+    compress_ms_b = [
+        r["compress_ms"] for r in records_b if r.get("compress_ms") is not None
+    ]
+    eval_ms_b = [r["eval_ms"] for r in records_b if r.get("eval_ms") is not None]
 
     return {
         "delta_tokens": delta_tokens,
@@ -213,11 +236,15 @@ def compute_metrics(
         "e2e_ratio": e2e_ratio,
         "cr_savings": cr_savings,
         "cost_saved_per_1k": cost_saved_per_1k,
-        "sidecar_p50_ms": sidecar_p50_ms,
+        "sidecar_p50_ms": _percentile(compress_ms_b, 0.50),
+        "sidecar_p95_ms": _percentile(compress_ms_b, 0.95),
+        "eval_p50_ms": _percentile(eval_ms_b, 0.50),
+        "eval_p95_ms": _percentile(eval_ms_b, 0.95),
         "tokens_a": tokens_a,
         "tokens_b": tokens_b,
         "acc_a": acc_a,
         "acc_b": acc_b,
+        "acc_closed_book": acc_closed_book,
     }
 
 
@@ -354,15 +381,13 @@ def format_report(
             rows.append(f"| {k} | {n} | {pct(a)} | {pct(b)} | {pct(b-a)} |")
         return rows
 
-    p50 = metrics.get("sidecar_p50_ms")
-    p50_str = f"{p50:,.0f} ms" if p50 is not None else "N/A"
+    def _ms(v: float | None) -> str:
+        return f"{v:,.0f} ms" if v is not None else "N/A"
 
-    # latency p95 from records_b duration
-    durations_b = sorted(r["duration_ms"] for r in records_b if r.get("duration_ms"))
-    p95_str = "N/A"
-    if durations_b:
-        idx95 = int(len(durations_b) * 0.95)
-        p95_str = f"{durations_b[min(idx95, len(durations_b)-1)]:,} ms"
+    p50_str = _ms(metrics.get("sidecar_p50_ms"))
+    p95_str = _ms(metrics.get("sidecar_p95_ms"))
+    eval_p50_str = _ms(metrics.get("eval_p50_ms"))
+    eval_p95_str = _ms(metrics.get("eval_p95_ms"))
 
     # ── build report ─────────────────────────────────────────────────────
     out: list[str] = []
@@ -422,6 +447,18 @@ def format_report(
         A("|---|---|---|---|---|")
         A(f"| **Overall** | {n_lb} | {pct(acc_a)} | {pct(acc_b)} | {pct(delta_acc)} |")
         A("")
+        acc_cb = metrics.get("acc_closed_book")
+        if acc_cb is not None:
+            lift_a = acc_a - acc_cb
+            lift_b = acc_b - acc_cb
+            A("**Closed-book control** (no document — answers from priors only): "
+              f"{pct(acc_cb)}. Context lift: Leg A {pct(lift_a)}, Leg B {pct(lift_b)}.")
+            if lift_b <= 0:
+                A("")
+                A("> ⚠️  Leg B accuracy does not beat the closed-book baseline — "
+                  "the compressed context may not be carrying the answer. Treat the "
+                  "accuracy result with caution.")
+            A("")
         diff_bd = _acc_breakdown(lb_a, "lb_difficulty")
         diff_bd_b = _acc_breakdown(lb_b, "lb_difficulty")
         if diff_bd:
@@ -490,10 +527,13 @@ def format_report(
     # 6. Latency
     A("## 6. Latency")
     A("")
-    A("| Metric | Value |")
-    A("|--------|-------|")
-    A(f"| Sidecar (Layer 8) P50 | {p50_str} |")
-    A(f"| Sidecar (Layer 8) P95 | {p95_str} |")
+    A("_Sidecar = the Layer 8 compression call in isolation (Leg B). Eval LLM "
+      "time is shown separately and is **not** part of the sidecar figure._")
+    A("")
+    A("| Metric | P50 | P95 |")
+    A("|--------|-----|-----|")
+    A(f"| Sidecar (Layer 8 compression) | {p50_str} | {p95_str} |")
+    A(f"| Eval LLM (LongBench answer) | {eval_p50_str} | {eval_p95_str} |")
     A("")
 
     # 7. Cost analysis
@@ -513,7 +553,7 @@ def format_report(
     A("---")
     A("")
     short_commit = cr_commit[:8] if cr_commit else "unknown"
-    A(f"_Generated by `bench_clawtypeor_phase1.py` · CR commit `{short_commit}`_")
+    A(f"_Generated by `bench_phase1.py` · CR commit `{short_commit}`_")
 
     return "\n".join(out)
 
@@ -557,6 +597,7 @@ def spawn_cr_shim(
 def spawn_leanctx_sidecar(
     url: str,
     lingua_ratio: float,
+    device: str = "auto",
 ) -> subprocess.Popen | None:
     if health_check(url):
         return None  # already running
@@ -564,11 +605,18 @@ def spawn_leanctx_sidecar(
 
     # Resolve leanctx-serve from the same venv as the running interpreter.
     venv_bin = str(Path(_sys.executable).parent)
+    # Pass the device through explicitly. An empty value lets the server
+    # auto-detect; anything else (cuda / cpu / mps) is honored verbatim. The
+    # server logs the *resolved* device at model load so the choice is
+    # provable from logs, not assumed.
+    device_env = "" if device == "auto" else device
     env = {
         **os.environ,
         "PATH": f"{venv_bin}:{os.environ.get('PATH', '')}",
         "LEANCTX_SERVER_LINGUA_RATIO": str(lingua_ratio),
+        "LEANCTX_SERVER_LINGUA_DEVICE": device_env,
     }
+    print(f"[sidecar] LEANCTX_SERVER_LINGUA_DEVICE={device_env or '(auto)'}")
     proc = subprocess.Popen(["leanctx-serve"], env=env)
     # 120 s: includes one-time LLMLingua-2 weight download + warmup pass.
     wait_for_health(proc, url, timeout=120)
@@ -580,7 +628,7 @@ def spawn_leanctx_sidecar(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def setup_clawtypeor(workdir: Path, commit: str = CR_DEFAULT_COMMIT) -> None:
+def setup_clawrouter(workdir: Path, commit: str = CR_DEFAULT_COMMIT) -> None:
     workdir.mkdir(parents=True, exist_ok=True)
     if not (workdir / ".git").exists():
         subprocess.run(["git", "clone", CR_REPO_URL, str(workdir)], check=True)
@@ -629,24 +677,61 @@ def _lb_head_tail(text: str, max_chars: int = 112_000) -> str:
     return text[:half] + "\n...[truncated]...\n" + text[-half:]
 
 
-def _load_lb_items(limit: int = 5, workload_tag: str = "lb_s1") -> list[dict[str, Any]]:
-    """Load and format LongBench v2 items for run_leg()."""
+def _load_lb_items(
+    limit: int = 5,
+    workload_tag: str = "lb_s1",
+    *,
+    seed: int = 1234,
+    oversample_long: bool = True,
+) -> list[dict[str, Any]]:
+    """Load and format LongBench v2 items for run_leg().
+
+    Sampling is stratified across (length × difficulty) cells but **random
+    within each cell** (seeded for reproducibility) — the previous
+    ``cell_items[:per_cell]`` took the first-N of each cell, which produced
+    the suspiciously balanced buckets the reviewer called out.
+
+    With ``oversample_long`` the ``long`` length category is given double
+    weight, since that is where Layer 8 showed a real (−10%) accuracy risk at
+    small N and needs more samples before any safety claim.
+    """
+    import random as _random
+
     from datasets import load_dataset
 
     ds = load_dataset("THUDM/LongBench-v2", split="train")
     items: list[dict] = list(ds)
 
-    # stratified sample across length × difficulty cells
     if limit > 0 and len(items) > limit:
+        rng = _random.Random(seed)
         cells: dict[tuple[str, str], list[dict]] = {}
         for it in items:
             key = (it.get("length", ""), it.get("difficulty", ""))
             cells.setdefault(key, []).append(it)
-        per_cell = max(1, limit // len(cells))
+
+        # Weight cells; long-context cells get double weight when oversampling.
+        weights = {
+            key: (2 if oversample_long and key[0] == "long" else 1)
+            for key in cells
+        }
+        total_weight = sum(weights.values())
+
         sample: list[dict] = []
-        for cell_items in cells.values():
-            sample.extend(cell_items[:per_cell])
-        items = sample[:limit]
+        for key, cell_items in cells.items():
+            quota = max(1, round(limit * weights[key] / total_weight))
+            quota = min(quota, len(cell_items))
+            sample.extend(rng.sample(cell_items, quota))
+
+        # Trim/pad to exactly `limit` from the remaining pool, randomly.
+        rng.shuffle(sample)
+        if len(sample) > limit:
+            sample = sample[:limit]
+        elif len(sample) < limit:
+            chosen = {id(x) for x in sample}
+            remaining = [it for it in items if id(it) not in chosen]
+            rng.shuffle(remaining)
+            sample.extend(remaining[: limit - len(sample)])
+        items = sample
 
     result = []
     for i, it in enumerate(items):
@@ -683,19 +768,28 @@ def call_eval_llm(
     compressed_messages: list[dict],
     item: dict,
     eval_cfg: dict,
+    *,
+    closed_book: bool = False,
 ) -> tuple[str | None, int]:
     """Build an LB prompt from compressed messages + item; call the eval LLM.
 
+    When ``closed_book`` is True the document context is dropped entirely and
+    the model must answer from priors alone — the control leg that rules out
+    the null hypothesis "the context was irrelevant" (see reviewer feedback).
+
     Returns (predicted_letter | None, input_tokens).
     """
-    context = _lb_head_tail(
-        " ".join(
-            m["content"]
-            for m in compressed_messages
-            if isinstance(m.get("content"), str)
-            and m.get("role") in ("user", "system", "assistant")
-        ).strip()
-    )
+    if closed_book:
+        context = "[no document provided]"
+    else:
+        context = _lb_head_tail(
+            " ".join(
+                m["content"]
+                for m in compressed_messages
+                if isinstance(m.get("content"), str)
+                and m.get("role") in ("user", "system", "assistant")
+            ).strip()
+        )
 
     prompt = (
         _LB_PROMPT_TEMPLATE
@@ -756,14 +850,31 @@ def run_leg(
     items: list[dict[str, Any]],
     shim_url: str,
     lb_cfg: dict | None,
+    *,
+    closed_book: bool = False,
 ) -> list[dict[str, Any]]:
     records = []
     for item in items:
         t0 = time.perf_counter()
         messages = item["messages"]
         tokens_raw = _sum_tokens(messages)
-        shim_result = compress_via_shim(messages, shim_url)
-        compressed = shim_result["messages"]
+        if closed_book:
+            # The control leg drops the document entirely, so there is nothing
+            # to compress and no shim is needed — skip it to avoid depending on
+            # a live sidecar/shim and to keep the leg cheap.
+            compressed = messages
+            compress_ms = 0
+            shim_result = {}
+        else:
+            # Time the compression sidecar call in isolation. The reviewer
+            # flagged that an end-to-end duration_ms wraps the eval LLM (and its
+            # retries), so it cannot stand in for Layer 8 latency — compress_ms
+            # is the real sidecar cost, eval_ms is reported separately and
+            # never conflated.
+            t_compress0 = time.perf_counter()
+            shim_result = compress_via_shim(messages, shim_url)
+            compress_ms = int((time.perf_counter() - t_compress0) * 1000)
+            compressed = shim_result["messages"]
         tokens_compressed = _sum_tokens(compressed)
         rec: dict[str, Any] = {
             "leg": leg,
@@ -773,10 +884,16 @@ def run_leg(
             "tokens_compressed": tokens_compressed,
             "cr_compression_ratio": shim_result.get("compressionRatio"),
             "cr_stats": shim_result.get("stats"),
+            "compress_ms": compress_ms,
+            "closed_book": closed_book,
             "accuracy": None,
         }
         if lb_cfg and item.get("question"):
-            answer, in_tok = call_eval_llm(compressed, item, lb_cfg)
+            t_eval0 = time.perf_counter()
+            answer, in_tok = call_eval_llm(
+                compressed, item, lb_cfg, closed_book=closed_book
+            )
+            rec["eval_ms"] = int((time.perf_counter() - t_eval0) * 1000)
             rec["accuracy"] = answer == item.get("gold")
             rec["lb_gold"] = item.get("gold")
             rec["lb_pred"] = answer
@@ -807,7 +924,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="ClawRouter × leanctx Phase 1 harness")
     parser.add_argument("--cr-commit", default=CR_DEFAULT_COMMIT)
-    parser.add_argument("--workdir", type=Path, default=Path("/tmp/clawtypeor_bench"))
+    parser.add_argument("--workdir", type=Path, default=Path("/tmp/clawrouter_bench"))
     parser.add_argument("--skip-setup", action="store_true")
     parser.add_argument("--dry-run-patch", action="store_true")
     parser.add_argument("--agent-stages", type=int, choices=[1, 2], default=1)
@@ -819,12 +936,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sidecar-url", default="http://127.0.0.1:8459")
     parser.add_argument("--shim-port", type=int, default=8461)
     parser.add_argument("--lingua-ratio", type=float, default=0.5)
+    parser.add_argument("--lingua-device",
+                        default=os.environ.get("LEANCTX_SERVER_LINGUA_DEVICE", "auto"),
+                        help="Device for Layer 8 Lingua: auto|cuda|cpu|mps. "
+                             "Passed to the sidecar; resolved device is logged.")
     parser.add_argument("--eval-provider",
                         default=os.environ.get("BENCHMARK_EVAL_PROVIDER", "anthropic"))
     parser.add_argument("--eval-model",
                         default=os.environ.get("BENCHMARK_EVAL_MODEL", "claude-sonnet-4-6"))
     parser.add_argument("--savings-threshold", type=float, default=0.20)
     parser.add_argument("--accuracy-drop", type=float, default=0.02)
+    parser.add_argument("--sample-seed", type=int, default=1234,
+                        help="Seed for random LongBench sampling (reproducibility).")
+    parser.add_argument("--no-oversample-long", dest="oversample_long",
+                        action="store_false", default=True,
+                        help="Disable double-weighting of long-context LB items.")
+    parser.add_argument("--closed-book", dest="closed_book", action="store_true",
+                        default=True,
+                        help="Run the no-context control leg (default: on).")
+    parser.add_argument("--no-closed-book", dest="closed_book", action="store_false")
     parser.add_argument("--out", type=Path, default=Path("./phase1_results.jsonl"))
     parser.add_argument("--report", type=Path, default=Path("./phase1_report.md"))
     args = parser.parse_args(argv)
@@ -832,6 +962,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run_patch:
         print(LAYER8_TS_BLOCK)
         return 0
+
+    # Token-count validation. Savings figures derive from leanctx.tokens, which
+    # silently falls back to a len(text)//4 char estimate when tiktoken is
+    # absent — which would make the savings a character ratio, not a token
+    # ratio. Hard-fail here so the reported number is always a real token count.
+    from leanctx.tokens import _load_tiktoken
+
+    if _load_tiktoken() is None:
+        print(
+            "[fatal] tiktoken is not installed — token counts would be a "
+            "char/4 estimate, not real tokens. Install with: "
+            "pip install 'leanctx[tokens]'",
+            flush=True,
+        )
+        return 2
+    print("[tokens] tiktoken present — token counts are exact (cl100k_base).")
 
     workdir = args.workdir
     sidecar_url = args.sidecar_url
@@ -845,12 +991,14 @@ def main(argv: list[str] | None = None) -> int:
     already_built = (workdir / "dist" / "compression" / "index.js").exists()
     if not args.skip_setup and not already_built:
         print("[setup] Cloning + building ClawRouter…")
-        setup_clawtypeor(workdir, commit=args.cr_commit)
+        setup_clawrouter(workdir, commit=args.cr_commit)
     write_shim_file(workdir)
 
     # ── Phase B: Spawn sidecar ────────────────────────────────────────────
     print(f"[sidecar] Checking {sidecar_url} …")
-    sidecar_proc = spawn_leanctx_sidecar(sidecar_url, lingua_ratio=args.lingua_ratio)
+    sidecar_proc = spawn_leanctx_sidecar(
+        sidecar_url, lingua_ratio=args.lingua_ratio, device=args.lingua_device
+    )
 
     # ── Phase C: Leg A (CR only) ──────────────────────────────────────────
     print("[leg A] Starting CR shim without sidecar …")
@@ -868,8 +1016,14 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.lb_stages >= 1:
             n = args.lb_n
-            print(f"[leg A] Loading {n} LongBench questions …")
-            lb_items = _load_lb_items(limit=n, workload_tag="lb_s1")
+            print(f"[leg A] Loading {n} LongBench questions "
+                  f"(seed={args.sample_seed}, oversample_long={args.oversample_long}) …")
+            lb_items = _load_lb_items(
+                limit=n,
+                workload_tag="lb_s1",
+                seed=args.sample_seed,
+                oversample_long=args.oversample_long,
+            )
             print(f"[leg A] Running lb_s1 ({n} items) …")
             records_a.extend(run_leg("A", lb_items, shim_a_url, lb_cfg=eval_cfg))
     finally:
@@ -899,6 +1053,17 @@ def main(argv: list[str] | None = None) -> int:
         shim_b.terminate()
         shim_b.wait()
 
+    # ── Phase C': Leg C (closed-book control) ─────────────────────────────
+    # No document at all — the model answers LongBench from priors. This is the
+    # control that rules out "the context was irrelevant"; it needs no shim and
+    # no sidecar, just the eval LLM. Runs over the same LB items as Leg A/B.
+    records_cb: list[dict[str, Any]] = []
+    if args.closed_book and args.lb_stages >= 1 and lb_items:
+        print(f"[leg C] Closed-book control ({len(lb_items)} items, no context) …")
+        records_cb.extend(
+            run_leg("C", lb_items, shim_url="", lb_cfg=eval_cfg, closed_book=True)
+        )
+
     # ── Phase D: Score + report ───────────────────────────────────────────
     if sidecar_proc is not None:
         sidecar_proc.terminate()
@@ -910,7 +1075,7 @@ def main(argv: list[str] | None = None) -> int:
     import datetime as _dt
     run_date = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    metrics = compute_metrics(all_a, all_b)
+    metrics = compute_metrics(all_a, all_b, records_cb)
     gate = apply_gate(metrics, savings_threshold=args.savings_threshold,
                       accuracy_drop=args.accuracy_drop)
     report_text = format_report(
@@ -926,7 +1091,7 @@ def main(argv: list[str] | None = None) -> int:
     # Write JSONL
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w") as f:
-        for rec in records_a + records_b:
+        for rec in records_a + records_b + records_cb:
             f.write(json.dumps(rec) + "\n")
 
     # Write report

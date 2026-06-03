@@ -1,6 +1,6 @@
 """Session-scoped fixtures for Sprint 8 end-to-end tests.
 
-Reuses the built ClawRouter from Sprint 6 (/tmp/clawtypeor_intg_test).
+Reuses the built ClawRouter from Sprint 6 (/tmp/clawrouter_intg_test).
 Makes real API calls using keys from .env (loaded via dotenv).
 Estimated cost: ~$0.50 for 5 LB questions × 2 legs.
 """
@@ -21,17 +21,17 @@ except ImportError:
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scripts.bench_clawtypeor_phase1 import (
+from benchmarks.clawrouter.bench_phase1 import (
     CR_DEFAULT_COMMIT,
     _load_lb_items,
     health_check,
     run_leg,
-    setup_clawtypeor,
+    setup_clawrouter,
     spawn_cr_shim,
     write_shim_file,
 )
 
-WORKDIR = Path("/tmp/clawtypeor_intg_test")  # reuse Sprint 6 build
+WORKDIR = Path("/tmp/clawrouter_intg_test")  # reuse Sprint 6 build
 SIDECAR_URL = "http://127.0.0.1:8459"
 _LEANCTX_SERVE = str(Path(sys.executable).parent / "leanctx-serve")
 _LB_LIMIT = 5  # questions per leg — keeps cost ~$0.50 total
@@ -55,7 +55,7 @@ def _ensure_api_keys() -> None:
 def e2e_cr_workdir():
     WORKDIR.mkdir(parents=True, exist_ok=True)
     if not (WORKDIR / "dist" / "compression" / "index.js").exists():
-        setup_clawtypeor(WORKDIR, commit=CR_DEFAULT_COMMIT)
+        setup_clawrouter(WORKDIR, commit=CR_DEFAULT_COMMIT)
     write_shim_file(WORKDIR)
     return WORKDIR
 

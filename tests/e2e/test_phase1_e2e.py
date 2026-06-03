@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.bench_clawtypeor_phase1 import (
+from benchmarks.clawrouter.bench_phase1 import (
     compute_metrics,
 )
 
@@ -93,14 +93,14 @@ def test_e2e_compute_metrics_produces_valid_delta(full_pipeline):
 def test_e2e_report_written_to_disk(full_pipeline, tmp_path):
     """main() writes results.jsonl + report.md; report contains PASS or NO-GO."""
 
-    from scripts.bench_clawtypeor_phase1 import main
+    from benchmarks.clawrouter.bench_phase1 import main
 
     out_path = tmp_path / "r.jsonl"
     report_path = tmp_path / "report.md"
 
     main([
         "--skip-setup",
-        "--workdir", "/tmp/clawtypeor_intg_test",
+        "--workdir", "/tmp/clawrouter_intg_test",
         "--lb-stages", "1",
         "--lb-n", "3",
         "--agent-stages", "1",

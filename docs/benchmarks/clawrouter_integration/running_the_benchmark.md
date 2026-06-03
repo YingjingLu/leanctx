@@ -1,6 +1,6 @@
 # ClawRouter × leanctx — Phase 1 Benchmark: Running Guide
 
-This document covers how to run `scripts/bench_clawtypeor_phase1.py` — the
+This document covers how to run `benchmarks/clawrouter/bench_phase1.py` — the
 go/no-go harness that measures whether leanctx Layer 8 (LLMLingua-2 prose
 compression) reduces tokens beyond ClawRouter's 7 structural layers while
 preserving LongBench v2 answer accuracy within the allowed threshold.
@@ -25,8 +25,8 @@ cp .env.example .env
 #   BENCHMARK_EVAL_MODEL=claude-sonnet-4-6
 
 # 3. Clone + build ClawRouter at the pinned commit (once, ~5 min)
-.venv/bin/python scripts/bench_clawtypeor_phase1.py \
-  --workdir /tmp/clawtypeor_bench
+.venv/bin/python benchmarks/clawrouter/bench_phase1.py \
+  --workdir /tmp/clawrouter_bench
   # Omit --skip-setup so it clones, patches, and builds automatically.
   # On subsequent runs add --skip-setup to reuse the existing build.
 ```
@@ -51,9 +51,9 @@ cp .env.example .env
 The standard first run. Produces a verdict and a human-readable Markdown report.
 
 ```bash
-.venv/bin/python scripts/bench_clawtypeor_phase1.py \
+.venv/bin/python benchmarks/clawrouter/bench_phase1.py \
   --skip-setup \
-  --workdir /tmp/clawtypeor_bench \
+  --workdir /tmp/clawrouter_bench \
   --agent-stages 1 \
   --lb-stages 1 --lb-n 60 \
   --eval-provider anthropic \
@@ -72,9 +72,9 @@ Run this after the go/no-go PASS to produce numbers comparable to the
 public LongBench v2 leaderboard.
 
 ```bash
-.venv/bin/python scripts/bench_clawtypeor_phase1.py \
+.venv/bin/python benchmarks/clawrouter/bench_phase1.py \
   --skip-setup \
-  --workdir /tmp/clawtypeor_bench \
+  --workdir /tmp/clawrouter_bench \
   --agent-stages 2 \
   --lb-stages 2 --lb-n 503 \
   --no-fail-fast \
@@ -92,7 +92,7 @@ public LongBench v2 leaderboard.
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--workdir PATH` | path | `/tmp/clawtypeor_bench` | Directory where ClawRouter is cloned, built, and the CR shim is written. Reused across runs; safe to point at the same path every time. |
+| `--workdir PATH` | path | `/tmp/clawrouter_bench` | Directory where ClawRouter is cloned, built, and the CR shim is written. Reused across runs; safe to point at the same path every time. |
 | `--cr-commit SHA` | string | `89269507b2173…` | Pinned ClawRouter git commit. The Layer 8 patch anchor has been verified unique at this commit. Change only if intentionally upgrading CR. |
 | `--skip-setup` | flag | off | Skip the clone → `npm ci` → patch → `npm run build` pipeline. Use this on every run after the first successful build to save ~5 min. Fails fast if `dist/compression/index.js` is missing. |
 | `--dry-run-patch` | flag | off | Print the Layer 8 TypeScript diff to stdout and exit immediately. No files are written and no processes are spawned. Useful for reviewing the patch before applying it. |
@@ -103,7 +103,10 @@ public LongBench v2 leaderboard.
 |----------|------|---------|-------------|
 | `--agent-stages 1\|2` | int | `1` | Agent workload depth. `1` = 9-message smoke fixture (`agent`); `2` = also runs the 50-message extended fixture (`agent_extended`, ~10 769 tokens). Agent items do not call the eval LLM; they contribute to token savings metrics only. |
 | `--lb-stages 1\|2` | int | `1` | LongBench v2 depth. `1` = run the sample defined by `--lb-n`; `2` = run both Stage 1 and Stage 2 (full 503-question set). With `--fail-fast` (default), Stage 2 is skipped if Stage 1 clearly fails both gate conditions. |
-| `--lb-n N` | int | `5` | Number of LongBench questions to run in Stage 1. Questions are drawn as a stratified sample across the 6 length × difficulty cells so every cell is represented. Recommended values: `5` (quick smoke), `60` (go/no-go), `503` (full set). |
+| `--lb-n N` | int | `5` | Number of LongBench questions to run in Stage 1. Questions are drawn as a **seeded random** sample, stratified across the 6 length × difficulty cells (random *within* each cell — not the first-N of each cell). Recommended values: `5` (quick smoke), `60` (go/no-go), `503` (full set). |
+| `--sample-seed N` | int | `1234` | Seed for the random LongBench sampler. Fix it for reproducible item selection across runs; change it to draw a different sample from the same cells. |
+| `--no-oversample-long` | flag | off | By default the `long` length category is given **double weight** in the sample, because that is where Layer 8 showed a real accuracy risk and needs more items before any safety claim. Pass this flag to weight all cells equally instead. |
+| `--closed-book` / `--no-closed-book` | flag | on | Run (or skip) the **closed-book control leg** (Leg C): the same LB questions answered with *no* document context. Establishes the prior-knowledge baseline so accuracy can be read as "context lift" rather than absolute — rules out the null hypothesis that the context was irrelevant. Needs no shim/sidecar; adds one eval-LLM call per LB item. |
 
 ### Fail-fast Behaviour
 
@@ -119,6 +122,7 @@ public LongBench v2 leaderboard.
 | `--sidecar-url URL` | string | `http://127.0.0.1:8459` | URL of the leanctx HTTP sidecar. If the sidecar is not reachable at this URL when the harness starts, it spawns `leanctx-serve` automatically and waits up to 120 s for warmup. If it is already running (e.g. from a previous run), it is reused and not stopped at the end. |
 | `--shim-port INT` | int | `8461` | Port for the Leg A CR shim (no sidecar). Leg B shim uses `--shim-port + 1` (default: 8462). Change if these ports are in use on your machine. |
 | `--lingua-ratio FLOAT` | float | `0.5` | Keep-ratio passed to LLMLingua-2 when the sidecar is auto-started. `0.5` means retain ~50% of tokens in eligible messages. Lower values = more aggressive compression; higher values = more conservative. Passed as `LEANCTX_SERVER_LINGUA_RATIO` to `leanctx-serve`. Has no effect if the sidecar is already running (its ratio was fixed at startup). |
+| `--lingua-device DEV` | string | `$LEANCTX_SERVER_LINGUA_DEVICE` or `auto` | Device for Layer 8 Lingua inference: `auto` (let the server detect cuda > mps > cpu), or an explicit `cuda` / `cpu` / `mps`. Passed as `LEANCTX_SERVER_LINGUA_DEVICE` to `leanctx-serve`, which logs the **resolved** device at model load (e.g. `actual_device=cuda:0`) so the device used in a report is provable from logs, not assumed. Has no effect if the sidecar is already running. |
 
 ### Evaluation LLM
 
@@ -142,7 +146,7 @@ public LongBench v2 leaderboard.
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--out PATH` | path | `./phase1_results.jsonl` | Path for per-item JSONL results. One line per workload item per leg, containing `leg`, `workload`, `item_id`, `tokens_raw`, `tokens_compressed`, `cr_compression_ratio`, `cr_stats` (per-layer breakdown), `accuracy`, `lb_gold`, `lb_pred`, `eval_input_tokens`, `duration_ms`. Append-safe across reruns if you use a new path each time. |
+| `--out PATH` | path | `./phase1_results.jsonl` | Path for per-item JSONL results. One line per workload item per leg (`A` = CR only, `B` = CR + leanctx, `C` = closed-book control), containing `leg`, `workload`, `item_id`, `tokens_raw`, `tokens_compressed`, `cr_compression_ratio`, `cr_stats` (per-layer breakdown), `compress_ms` (isolated sidecar latency), `eval_ms` (eval-LLM latency), `closed_book`, `accuracy`, `lb_gold`, `lb_pred`, `eval_input_tokens`, `duration_ms`. Append-safe across reruns if you use a new path each time. |
 | `--report PATH` | path | `./phase1_report.md` | Path for the human-readable Markdown report. Contains the go/no-go verdict, token compression table, LongBench accuracy breakdown by difficulty/length/domain, CR layer contributions, latency stats, and cost analysis. |
 
 ---
@@ -267,9 +271,9 @@ JSONL will contain partial results. Re-run with a **new `--out` path** to
 avoid mixing partial and complete data, then use a new `--report` path:
 
 ```bash
-.venv/bin/python scripts/bench_clawtypeor_phase1.py \
+.venv/bin/python benchmarks/clawrouter/bench_phase1.py \
   --skip-setup \
-  --workdir /tmp/clawtypeor_bench \
+  --workdir /tmp/clawrouter_bench \
   --agent-stages 1 --lb-stages 1 --lb-n 60 \
   --out phase1_results_retry.jsonl \
   --report phase1_report_retry.md

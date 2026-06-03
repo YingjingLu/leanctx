@@ -157,6 +157,9 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Repo root on sys.path so tests can import the relocated ClawRouter harness
+# (benchmarks.clawrouter.bench_phase1) without relying on `python -m pytest`.
+pythonpath = ["."]
 asyncio_mode = "auto"
 markers = [
     "unit: pure Python, no I/O, runs in CI always",

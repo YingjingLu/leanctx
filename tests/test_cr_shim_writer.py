@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.bench_clawtypeor_phase1 import write_shim_file
+from benchmarks.clawrouter.bench_phase1 import write_shim_file
 
 _SEVEN_LAYERS = [
     "deduplication",

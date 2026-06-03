@@ -1,7 +1,7 @@
 """Session-scoped fixtures for Sprint 6 + 7 integration tests.
 
 Setup (runs once per test session):
-  1. Clone + patch + build ClawRouter at pinned commit → /tmp/clawtypeor_intg_test
+  1. Clone + patch + build ClawRouter at pinned commit → /tmp/clawrouter_intg_test
   2. Write cr_shim.mjs into the workdir
   3. Spawn CR shim without sidecar (port 8461)    → built_cr_shim_no_sidecar
   4. Auto-start leanctx-serve, spawn CR shim      → built_cr_shim_with_sidecar
@@ -23,15 +23,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scripts.bench_clawtypeor_phase1 import (
+from benchmarks.clawrouter.bench_phase1 import (
     CR_DEFAULT_COMMIT,
     health_check,
-    setup_clawtypeor,
+    setup_clawrouter,
     spawn_cr_shim,
     write_shim_file,
 )
 
-WORKDIR = Path("/tmp/clawtypeor_intg_test")
+WORKDIR = Path("/tmp/clawrouter_intg_test")
 SIDECAR_URL = "http://127.0.0.1:8459"
 
 # leanctx-serve lives next to the Python interpreter — works in venv and system install.
@@ -55,7 +55,7 @@ def built_cr():
     """Clone, patch, and build ClawRouter once for the whole test session."""
     WORKDIR.mkdir(parents=True, exist_ok=True)
     if not (WORKDIR / "dist" / "compression" / "index.js").exists():
-        setup_clawtypeor(WORKDIR, commit=CR_DEFAULT_COMMIT)
+        setup_clawrouter(WORKDIR, commit=CR_DEFAULT_COMMIT)
     write_shim_file(WORKDIR)
     return WORKDIR
 

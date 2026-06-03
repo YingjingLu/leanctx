@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+from benchmarks.clawrouter.bench_phase1 import run_leg
 from leanctx.bench.workloads import load_workload
-from scripts.bench_clawtypeor_phase1 import run_leg
 
 
 def _make_items(workload_name: str) -> list[dict]:

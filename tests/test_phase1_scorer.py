@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.bench_clawtypeor_phase1 import (
+from benchmarks.clawrouter.bench_phase1 import (
     GateResult,
     apply_gate,
     compute_metrics,
