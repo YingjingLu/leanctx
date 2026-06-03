@@ -215,8 +215,15 @@ def test_compute_metrics_closed_book_accuracy_and_none():
 
 
 def _fake_dataset(monkeypatch):
-    """Patch datasets.load_dataset to return a synthetic LongBench-ish pool."""
-    import datasets
+    """Patch datasets.load_dataset to return a synthetic LongBench-ish pool.
+
+    The real ``datasets`` package is never exercised — it is fully mocked — and
+    it is not a ``[dev]`` dependency, so CI installs without it. When it is
+    absent we inject a lightweight stub module so ``_load_lb_items``'s
+    ``from datasets import load_dataset`` still resolves.
+    """
+    import sys
+    import types
 
     items = []
     for length in ("short", "medium", "long"):
@@ -231,7 +238,14 @@ def _fake_dataset(monkeypatch):
                     "answer": "A",
                     "domain": "d", "difficulty": diff, "length": length,
                 })
-    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **k: items)
+
+    try:
+        import datasets
+    except ModuleNotFoundError:
+        datasets = types.ModuleType("datasets")
+        monkeypatch.setitem(sys.modules, "datasets", datasets)
+
+    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **k: items, raising=False)
 
 
 @pytest.mark.unit
