@@ -11,12 +11,17 @@ import pytest
 
 import benchmarks.clawrouter.bench_phase1 as harness
 from benchmarks.clawrouter.bench_phase1 import (
+    GateResult,
     _extract_lb_answer,
     _load_lb_items,
     _percentile,
     _sum_tokens,
+    _verbatim_split_item,
+    aggregate_verbatim_metrics,
     compute_metrics,
+    format_report,
     run_leg,
+    verbatim_split_by_item,
 )
 
 # ── _extract_lb_answer ──────────────────────────────────────────────────────
@@ -287,3 +292,174 @@ def test_load_lb_items_oversamples_long(monkeypatch):
     n_short = lengths.count("short")
     # long is double-weighted, so it should out-represent short
     assert n_long > n_short
+
+
+# ── Verbatim-excluded compression metrics (Phase B) ─────────────────────────
+
+_PROSE = "the quick brown fox jumps over the lazy dog " * 40   # plain prose
+_CODE = "```python\nimport os\nimport sys\ndef f():\n    return os\n```"
+
+
+def _msg(content: str, role: str = "user") -> dict:
+    return {"role": role, "content": content}
+
+
+@pytest.mark.unit
+def test_verbatim_split_item_prose_is_compressed():
+    a = [_msg(_PROSE)]
+    b = [_msg("fox dog")]  # pretend-compressed (fewer tokens)
+    v, c_in, c_out, route = _verbatim_split_item(a, b, threshold=10)
+    assert v == 0
+    assert c_in == _sum_tokens(a)
+    assert c_out == _sum_tokens(b)
+    assert c_out < c_in
+    assert route == "lingua"
+
+
+@pytest.mark.unit
+def test_verbatim_split_item_code_is_verbatim():
+    a = [_msg(_CODE)]
+    b = [_msg(_CODE)]  # verbatim → unchanged
+    v, c_in, c_out, route = _verbatim_split_item(a, b, threshold=10)
+    assert c_in == 0 and c_out == 0
+    assert v == _sum_tokens(a)
+    assert route == "verbatim"
+
+
+@pytest.mark.unit
+def test_verbatim_split_item_below_threshold_all_verbatim():
+    """A request under the token gate is passed through → everything verbatim."""
+    a = [_msg(_PROSE)]
+    b = [_msg("fox dog")]
+    v, c_in, c_out, route = _verbatim_split_item(a, b, threshold=10_000_000)
+    assert c_in == 0 and c_out == 0
+    assert v == _sum_tokens(a)
+    assert route == "verbatim"
+
+
+@pytest.mark.unit
+def test_verbatim_split_item_ineligible_role_is_verbatim():
+    """tool-role / non-string content is never eligible → verbatim."""
+    a = [_msg(_PROSE, role="tool")]
+    b = [_msg(_PROSE, role="tool")]
+    v, c_in, c_out, route = _verbatim_split_item(a, b, threshold=10)
+    assert c_in == 0 and v == _sum_tokens(a)
+    assert route == "verbatim"
+
+
+@pytest.mark.unit
+def test_verbatim_split_item_hybrid():
+    a = [_msg(_PROSE), _msg(_CODE)]
+    b = [_msg("fox dog"), _msg(_CODE)]
+    v, c_in, c_out, route = _verbatim_split_item(a, b, threshold=10)
+    assert c_in == _sum_tokens([a[0]])
+    assert v == _sum_tokens([a[1]])
+    assert route == "hybrid"
+
+
+@pytest.mark.unit
+def test_verbatim_split_item_misaligned_returns_none():
+    """Different message counts (CR non-determinism) → caller-skippable None."""
+    assert _verbatim_split_item([_msg("a")], [_msg("a"), _msg("b")], threshold=10) is None
+
+
+@pytest.mark.unit
+def test_verbatim_split_by_item_pairs_only_shared_ids():
+    a = {"x": [_msg(_PROSE)], "only_a": [_msg(_PROSE)]}
+    b = {"x": [_msg("fox dog")], "only_b": [_msg("y")]}
+    out = verbatim_split_by_item(a, b, threshold=10)
+    assert set(out) == {"x"}
+    assert out["x"]["lx_route"] == "lingua"
+    assert out["x"]["lx_compressed_in_tokens"] > 0
+
+
+@pytest.mark.unit
+def test_aggregate_verbatim_metrics_decomposition_identity():
+    """overall_savings == (1 - verbatim_share) * nonverbatim_savings (exact)."""
+    per_item = {
+        "a": {
+            "lx_verbatim_tokens": 100,
+            "lx_compressed_in_tokens": 100,
+            "lx_compressed_out_tokens": 40,
+            "lx_route": "hybrid",
+        }
+    }
+    m = aggregate_verbatim_metrics(per_item)
+    assert m is not None
+    assert m["verbatim_share"] == pytest.approx(0.5)
+    assert m["nonverbatim_ratio"] == pytest.approx(0.4)
+    assert m["nonverbatim_savings"] == pytest.approx(0.6)
+    assert m["overall_savings"] == pytest.approx(0.3)
+    assert m["token_delta"] == 60
+    # the headline identity that motivates the whole section
+    assert m["overall_savings"] == pytest.approx(
+        (1 - m["verbatim_share"]) * m["nonverbatim_savings"]
+    )
+
+
+@pytest.mark.unit
+def test_aggregate_verbatim_metrics_all_verbatim_no_zero_division():
+    per_item = {
+        "a": {
+            "lx_verbatim_tokens": 100,
+            "lx_compressed_in_tokens": 0,
+            "lx_compressed_out_tokens": 0,
+            "lx_route": "verbatim",
+        }
+    }
+    m = aggregate_verbatim_metrics(per_item)
+    assert m is not None
+    assert m["nonverbatim_ratio"] is None
+    assert m["nonverbatim_savings"] is None
+    assert m["verbatim_share"] == pytest.approx(1.0)
+    assert m["overall_savings"] == pytest.approx(0.0)
+    assert m["token_delta"] == 0
+
+
+@pytest.mark.unit
+def test_aggregate_verbatim_metrics_empty_is_none():
+    assert aggregate_verbatim_metrics({}) is None
+
+
+# ── format_report: verbatim section rendering ────────────────────────────────
+
+
+def _minimal_records():
+    records_a = [{"tokens_raw": 100, "tokens_compressed": 90, "accuracy": True}]
+    records_b = [{"tokens_raw": 100, "tokens_compressed": 50, "accuracy": True}]
+    return records_a, records_b
+
+
+@pytest.mark.unit
+def test_format_report_includes_verbatim_section():
+    records_a, records_b = _minimal_records()
+    metrics = compute_metrics(records_a, records_b)
+    vm = aggregate_verbatim_metrics({
+        "a": {
+            "lx_verbatim_tokens": 100,
+            "lx_compressed_in_tokens": 100,
+            "lx_compressed_out_tokens": 40,
+            "lx_route": "hybrid",
+        }
+    })
+    text = format_report(
+        metrics, GateResult(passed=True),
+        records_a=records_a, records_b=records_b,
+        verbatim_metrics=vm,
+    )
+    assert "2b. Compression Excluding Verbatim Content" in text
+    assert "Verbatim share" in text
+    assert "Non-verbatim only" in text
+    assert "Decomposition" in text
+
+
+@pytest.mark.unit
+def test_format_report_omits_verbatim_section_when_absent():
+    records_a, records_b = _minimal_records()
+    metrics = compute_metrics(records_a, records_b)
+    text = format_report(
+        metrics, GateResult(passed=True),
+        records_a=records_a, records_b=records_b,
+        verbatim_metrics=None,
+    )
+    assert "Compression Excluding Verbatim Content" not in text

@@ -248,6 +248,163 @@ def compute_metrics(
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Verbatim-excluded compression metrics (Phase B)
+#
+# The headline Layer-8 savings is diluted by content the classifier routes to
+# Verbatim (code, errors, structured data). This second view reports the
+# compression ratio on ONLY the content leanctx actually compressed — a number
+# that is invariant to how much of the sample happens to be verbatim-routed.
+#
+# We replay leanctx's real eligibility filter + classifier on the Leg-A
+# (CR-only) output, which — because CR's 7 layers are deterministic — equals
+# the input leanctx saw inside Leg B. No leanctx core changes (that is Phase A).
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Mirrors leanctx.server._default_config(): the request-level token gate below
+# which the sidecar passes the whole request through verbatim. The harness
+# spawns the sidecar with the same environment, so reading it here reproduces
+# the value the sidecar actually used.
+_SIDECAR_THRESHOLD_DEFAULT = 1500
+
+
+def _sidecar_threshold() -> int:
+    return int(os.environ.get("LEANCTX_SERVER_THRESHOLD", str(_SIDECAR_THRESHOLD_DEFAULT)))
+
+
+def _verbatim_split_item(
+    msgs_a: list[dict[str, Any]],
+    msgs_b: list[dict[str, Any]],
+    *,
+    threshold: int,
+) -> tuple[int, int, int, str] | None:
+    """Bucket one item's Layer-8 input into verbatim vs compressed tokens.
+
+    ``msgs_a`` is the CR-only output (== what leanctx saw inside Leg B), aligned
+    message-for-message with ``msgs_b`` (the CR + leanctx output). Reuses
+    leanctx's *real* eligibility roles and ``classify()`` so there is no copied
+    routing logic to drift.
+
+    Returns ``(verbatim_tokens, compressed_in, compressed_out, route)`` where
+    ``route`` is ``"verbatim"`` | ``"lingua"`` | ``"hybrid"``, or ``None`` when
+    the two legs cannot be aligned (different message counts → caller skips).
+    """
+    from leanctx.classifier import classify
+    from leanctx.compressors import ContentType
+    from leanctx.server import _COMPRESSIBLE_ROLES
+
+    if len(msgs_a) != len(msgs_b):
+        return None
+
+    eligible = {
+        i
+        for i, m in enumerate(msgs_a)
+        if m.get("role") in _COMPRESSIBLE_ROLES and isinstance(m.get("content"), str)
+    }
+    # Request-level gate: if the eligible subset is under the threshold the
+    # whole request is passed through, so nothing is compressed.
+    eligible_tokens = sum(_sum_tokens([msgs_a[i]]) for i in eligible)
+    request_compressible = eligible_tokens >= threshold
+
+    verbatim = comp_in = comp_out = 0
+    n_compressed = 0
+    for i, (ma, mb) in enumerate(zip(msgs_a, msgs_b, strict=True)):
+        ta = _sum_tokens([ma])
+        is_compressed = (
+            request_compressible
+            and i in eligible
+            and classify(ma) is ContentType.PROSE
+        )
+        if is_compressed:
+            comp_in += ta
+            comp_out += _sum_tokens([mb])
+            n_compressed += 1
+        else:
+            verbatim += ta
+
+    if n_compressed == 0:
+        route = "verbatim"
+    elif n_compressed == len(msgs_a):
+        route = "lingua"
+    else:
+        route = "hybrid"
+    return verbatim, comp_in, comp_out, route
+
+
+def verbatim_split_by_item(
+    msgs_a_by_id: dict[str, list[dict[str, Any]]],
+    msgs_b_by_id: dict[str, list[dict[str, Any]]],
+    *,
+    threshold: int | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Per-item verbatim/non-verbatim token split for every item present in
+    both leg maps. Returns ``{item_id: {lx_* fields}}`` (items that cannot be
+    aligned are omitted)."""
+    if threshold is None:
+        threshold = _sidecar_threshold()
+    out: dict[str, dict[str, Any]] = {}
+    for item_id in msgs_a_by_id:
+        if item_id not in msgs_b_by_id:
+            continue
+        split = _verbatim_split_item(
+            msgs_a_by_id[item_id], msgs_b_by_id[item_id], threshold=threshold
+        )
+        if split is None:
+            continue
+        v, c_in, c_out, route = split
+        out[item_id] = {
+            "lx_verbatim_tokens": v,
+            "lx_compressed_in_tokens": c_in,
+            "lx_compressed_out_tokens": c_out,
+            "lx_route": route,
+        }
+    return out
+
+
+def aggregate_verbatim_metrics(
+    per_item: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Aggregate per-item splits into the figures the report needs. Returns
+    ``None`` when there is nothing to analyse."""
+    if not per_item:
+        return None
+
+    tot_v = sum(d["lx_verbatim_tokens"] for d in per_item.values())
+    tot_in = sum(d["lx_compressed_in_tokens"] for d in per_item.values())
+    tot_out = sum(d["lx_compressed_out_tokens"] for d in per_item.values())
+    n = len(per_item)
+
+    route_counts = {"verbatim": 0, "lingua": 0, "hybrid": 0}
+    for d in per_item.values():
+        route_counts[d["lx_route"]] = route_counts.get(d["lx_route"], 0) + 1
+
+    layer8_in = tot_v + tot_in
+    layer8_out = tot_v + tot_out
+    verbatim_share = tot_v / layer8_in if layer8_in else 0.0
+    nv_ratio = (tot_out / tot_in) if tot_in else None
+    nv_savings = (1.0 - nv_ratio) if nv_ratio is not None else None
+    overall_savings = (layer8_in - layer8_out) / layer8_in if layer8_in else 0.0
+
+    return {
+        "n_items": n,
+        "verbatim_tokens": tot_v,
+        "compressed_in_tokens": tot_in,
+        "compressed_out_tokens": tot_out,
+        "layer8_in_tokens": layer8_in,
+        "layer8_out_tokens": layer8_out,
+        "verbatim_share": verbatim_share,
+        "nonverbatim_ratio": nv_ratio,
+        "nonverbatim_savings": nv_savings,
+        "overall_savings": overall_savings,
+        "token_delta": tot_in - tot_out,
+        "route_counts": route_counts,
+        "avg_layer8_in": layer8_in / n,
+        "avg_layer8_out": layer8_out / n,
+        "avg_nv_in": tot_in / n,
+        "avg_nv_out": tot_out / n,
+    }
+
+
 def apply_gate(
     metrics: dict[str, Any],
     *,
@@ -282,6 +439,7 @@ def format_report(
     cr_commit: str = "",
     savings_threshold: float = 0.20,
     accuracy_drop: float = 0.02,
+    verbatim_metrics: dict[str, Any] | None = None,
 ) -> str:
     """Generate a rich Markdown Phase 1 report.
 
@@ -438,6 +596,43 @@ def format_report(
       f"−{pct(1 - metrics.get('e2e_ratio', 1.0))} | "
       f"−{pct(metrics.get('delta_tokens'))} |")
     A("")
+
+    # 2b. Compression excluding verbatim content
+    if verbatim_metrics is not None:
+        vm = verbatim_metrics
+        rc = vm["route_counts"]
+        n = vm["n_items"]
+        overall_ratio = (
+            vm["layer8_out_tokens"] / vm["layer8_in_tokens"]
+            if vm["layer8_in_tokens"]
+            else None
+        )
+        A("## 2b. Compression Excluding Verbatim Content")
+        A("")
+        A("_Layer 8 routes code, errors, and structured content to **Verbatim "
+          "(0%)**. This view reports compression on only the content actually "
+          "sent to the compressor — a figure invariant to how much of the sample "
+          "is verbatim-routed (see `oversampling_analysis.html`)._")
+        A("")
+        A(f"**Verbatim share:** {pct(vm['verbatim_share'])} of Layer-8 input "
+          f"tokens were preserved verbatim. Routing mix over {n} items: "
+          f"{rc.get('lingua', 0)} compressed · {rc.get('verbatim', 0)} verbatim · "
+          f"{rc.get('hybrid', 0)} mixed.")
+        A("")
+        A("| View | Avg input / req | Avg output / req | Ratio | Savings | Δ tokens / req |")
+        A("|------|-----------------|------------------|-------|---------|----------------|")
+        A(f"| Overall (incl. verbatim) | {vm['avg_layer8_in']:,.0f} | "
+          f"{vm['avg_layer8_out']:,.0f} | {fmt_f(overall_ratio, 3)} | "
+          f"{pct(vm['overall_savings'])} | {vm['token_delta'] / n:,.0f} |")
+        A(f"| **Non-verbatim only** | {vm['avg_nv_in']:,.0f} | "
+          f"{vm['avg_nv_out']:,.0f} | {fmt_f(vm['nonverbatim_ratio'], 3)} | "
+          f"{pct(vm['nonverbatim_savings'])} | {vm['token_delta'] / n:,.0f} |")
+        A("")
+        A(f"_Decomposition: overall {pct(vm['overall_savings'])} ≈ "
+          f"(1 − {pct(vm['verbatim_share'])}) × non-verbatim "
+          f"{pct(vm['nonverbatim_savings'])}. The absolute token delta is "
+          f"identical in both views — verbatim content contributes 0._")
+        A("")
 
     # 3. LongBench accuracy
     A("## 3. LongBench v2 Accuracy")
@@ -691,7 +886,7 @@ def _load_lb_items(
     ``cell_items[:per_cell]`` took the first-N of each cell, which produced
     the suspiciously balanced buckets the reviewer called out.
 
-    With ``oversample_long`` the ``long`` length category is given double
+    With ``oversample_long`` the ``long`` length category is given 1.5×
     weight, since that is where Layer 8 showed a real (−10%) accuracy risk at
     small N and needs more samples before any safety claim.
     """
@@ -709,9 +904,9 @@ def _load_lb_items(
             key = (it.get("length", ""), it.get("difficulty", ""))
             cells.setdefault(key, []).append(it)
 
-        # Weight cells; long-context cells get double weight when oversampling.
+        # Weight cells; long-context cells get 1.5× weight when oversampling.
         weights = {
-            key: (2 if oversample_long and key[0] == "long" else 1)
+            key: (1.5 if oversample_long and key[0] == "long" else 1.0)
             for key in cells
         }
         total_weight = sum(weights.values())
@@ -852,6 +1047,7 @@ def run_leg(
     lb_cfg: dict | None,
     *,
     closed_book: bool = False,
+    msg_sink: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     records = []
     for item in items:
@@ -876,6 +1072,11 @@ def run_leg(
             compress_ms = int((time.perf_counter() - t_compress0) * 1000)
             compressed = shim_result["messages"]
         tokens_compressed = _sum_tokens(compressed)
+        # Retain the compressed messages for the post-run verbatim split
+        # (Phase B). Keyed by item_id; agent items without an id are skipped.
+        item_id = item.get("item_id")
+        if msg_sink is not None and item_id is not None:
+            msg_sink[item_id] = compressed
         rec: dict[str, Any] = {
             "leg": leg,
             "workload": item.get("workload", "unknown"),
@@ -1005,6 +1206,10 @@ def main(argv: list[str] | None = None) -> int:
     shim_a = spawn_cr_shim(workdir, port=args.shim_port, extra_env={})
     shim_a_url = f"http://127.0.0.1:{args.shim_port}"
 
+    # Compressed-message sinks for the verbatim split (Phase B).
+    msgs_a_by_id: dict[str, list[dict[str, Any]]] = {}
+    msgs_b_by_id: dict[str, list[dict[str, Any]]] = {}
+
     records_a: list[dict[str, Any]] = []
     try:
         from leanctx.bench.workloads import load_workload
@@ -1025,7 +1230,9 @@ def main(argv: list[str] | None = None) -> int:
                 oversample_long=args.oversample_long,
             )
             print(f"[leg A] Running lb_s1 ({n} items) …")
-            records_a.extend(run_leg("A", lb_items, shim_a_url, lb_cfg=eval_cfg))
+            records_a.extend(
+                run_leg("A", lb_items, shim_a_url, lb_cfg=eval_cfg, msg_sink=msgs_a_by_id)
+            )
     finally:
         shim_a.terminate()
         shim_a.wait()
@@ -1048,7 +1255,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.lb_stages >= 1:
             # reuse same LB items from Leg A
             print(f"[leg B] Running lb_s1 ({len(lb_items)} items) …")
-            records_b.extend(run_leg("B", lb_items, shim_b_url, lb_cfg=eval_cfg))
+            records_b.extend(
+                run_leg("B", lb_items, shim_b_url, lb_cfg=eval_cfg, msg_sink=msgs_b_by_id)
+            )
     finally:
         shim_b.terminate()
         shim_b.wait()
@@ -1078,6 +1287,18 @@ def main(argv: list[str] | None = None) -> int:
     metrics = compute_metrics(all_a, all_b, records_cb)
     gate = apply_gate(metrics, savings_threshold=args.savings_threshold,
                       accuracy_drop=args.accuracy_drop)
+
+    # Verbatim-excluded compression view (Phase B): split each item's Layer-8
+    # input into verbatim vs compressed tokens, then enrich the Leg B records
+    # so the per-item split lands in the JSONL too.
+    per_item_split = verbatim_split_by_item(msgs_a_by_id, msgs_b_by_id)
+    verbatim_metrics = aggregate_verbatim_metrics(per_item_split)
+    for rec in records_b:
+        rec_id = rec.get("item_id")
+        extra = per_item_split.get(rec_id) if rec_id is not None else None
+        if extra:
+            rec.update(extra)
+
     report_text = format_report(
         metrics, gate,
         records_a=all_a, records_b=all_b,
@@ -1086,6 +1307,7 @@ def main(argv: list[str] | None = None) -> int:
         cr_commit=args.cr_commit,
         savings_threshold=args.savings_threshold,
         accuracy_drop=args.accuracy_drop,
+        verbatim_metrics=verbatim_metrics,
     )
 
     # Write JSONL

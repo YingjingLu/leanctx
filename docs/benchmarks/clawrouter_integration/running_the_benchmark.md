@@ -105,7 +105,7 @@ public LongBench v2 leaderboard.
 | `--lb-stages 1\|2` | int | `1` | LongBench v2 depth. `1` = run the sample defined by `--lb-n`; `2` = run both Stage 1 and Stage 2 (full 503-question set). With `--fail-fast` (default), Stage 2 is skipped if Stage 1 clearly fails both gate conditions. |
 | `--lb-n N` | int | `5` | Number of LongBench questions to run in Stage 1. Questions are drawn as a **seeded random** sample, stratified across the 6 length × difficulty cells (random *within* each cell — not the first-N of each cell). Recommended values: `5` (quick smoke), `60` (go/no-go), `503` (full set). |
 | `--sample-seed N` | int | `1234` | Seed for the random LongBench sampler. Fix it for reproducible item selection across runs; change it to draw a different sample from the same cells. |
-| `--no-oversample-long` | flag | off | By default the `long` length category is given **double weight** in the sample, because that is where Layer 8 showed a real accuracy risk and needs more items before any safety claim. Pass this flag to weight all cells equally instead. |
+| `--no-oversample-long` | flag | off | By default the `long` length category is given **1.5× weight** in the sample, because that is where Layer 8 showed a real accuracy risk and needs more items before any safety claim. Pass this flag to weight all cells equally instead. |
 | `--closed-book` / `--no-closed-book` | flag | on | Run (or skip) the **closed-book control leg** (Leg C): the same LB questions answered with *no* document context. Establishes the prior-knowledge baseline so accuracy can be read as "context lift" rather than absolute — rules out the null hypothesis that the context was irrelevant. Needs no shim/sidecar; adds one eval-LLM call per LB item. |
 
 ### Fail-fast Behaviour
@@ -183,11 +183,23 @@ One JSON object per line, one line per (leg, item) pair:
   "lb_difficulty": "hard",
   "lb_length": "short",
   "eval_input_tokens": 14950,
-  "duration_ms": 38420
+  "duration_ms": 38420,
+  "lx_route": "lingua",
+  "lx_verbatim_tokens": 0,
+  "lx_compressed_in_tokens": 14830,
+  "lx_compressed_out_tokens": 7100
 }
 ```
 
 `accuracy` is `null` for agent workload items (no eval LLM is called).
+
+The `lx_*` fields appear on **Leg B** records only and record the
+verbatim-excluded split (Phase B): how the item's Layer-8 input was routed.
+`lx_route` is `verbatim` (preserved unchanged), `lingua` (compressed), or
+`hybrid` (block-mixed). `lx_verbatim_tokens` + `lx_compressed_in_tokens` is the
+Layer-8 input; `lx_compressed_out_tokens` is the compressed size of the
+non-verbatim portion. These are computed post-run by replaying leanctx's real
+classifier on the Leg-A (CR-only) output, so they require no live sidecar.
 
 ### `phase1_report.md`
 
@@ -195,6 +207,10 @@ Structured Markdown with seven sections:
 
 1. **Go / No-Go Gate** — threshold vs actual for both gate conditions
 2. **Token Compression** — raw → CR → CR+leanctx table (absolute + %)
+2b. **Compression Excluding Verbatim Content** — overall vs non-verbatim-only
+   compression, the verbatim share, the routing mix, and the decomposition
+   `overall ≈ (1 − verbatim_share) × non_verbatim`. This view is invariant to
+   sample composition; the go/no-go gate still keys off the overall savings.
 3. **LongBench v2 Accuracy** — overall + breakdowns by difficulty, length, domain
 4. **Per-Workload Breakdown** — agent and LB items separated, with token deltas
 5. **ClawRouter Layer Contributions** — per-layer stats (L1–L7) plus L8 Δ tokens/item

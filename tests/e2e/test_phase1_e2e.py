@@ -114,3 +114,58 @@ def test_e2e_report_written_to_disk(full_pipeline, tmp_path):
     report_text = report_path.read_text()
     assert "PASS" in report_text or "NO-GO" in report_text, \
         f"report.md does not contain verdict:\n{report_text[:500]}"
+
+
+@pytest.mark.e2e
+def test_e2e_verbatim_split_section_and_jsonl(tmp_path):
+    """Phase B: main() emits the verbatim-excluded section and per-item lx_*
+    fields in the JSONL, and the decomposition identity holds on real data."""
+    import json
+
+    from benchmarks.clawrouter.bench_phase1 import main
+
+    out_path = tmp_path / "v.jsonl"
+    report_path = tmp_path / "vreport.md"
+
+    main([
+        "--skip-setup",
+        "--workdir", "/tmp/clawrouter_intg_test",
+        "--lb-stages", "1",
+        "--lb-n", "2",
+        "--agent-stages", "1",
+        "--no-closed-book",        # keep the smoke cheap
+        "--shim-port", "8475",
+        "--out", str(out_path),
+        "--report", str(report_path),
+    ])
+
+    report_text = report_path.read_text()
+    assert "2b. Compression Excluding Verbatim Content" in report_text
+    assert "Verbatim share" in report_text
+
+    # Leg B records carry the per-item split.
+    leg_b = [
+        json.loads(line)
+        for line in out_path.read_text().splitlines()
+        if json.loads(line)["leg"] == "B" and json.loads(line).get("item_id")
+    ]
+    with_split = [r for r in leg_b if "lx_route" in r]
+    assert with_split, "no Leg B record carried the lx_* split fields"
+    for r in with_split:
+        assert r["lx_route"] in ("verbatim", "lingua", "hybrid")
+        assert (
+            r["lx_verbatim_tokens"]
+            + r["lx_compressed_in_tokens"]
+            >= 0
+        )
+
+    # Decomposition identity on the aggregate of the split records.
+    tot_v = sum(r["lx_verbatim_tokens"] for r in with_split)
+    tot_in = sum(r["lx_compressed_in_tokens"] for r in with_split)
+    tot_out = sum(r["lx_compressed_out_tokens"] for r in with_split)
+    layer8_in = tot_v + tot_in
+    if layer8_in and tot_in:
+        share = tot_v / layer8_in
+        nv_savings = 1 - tot_out / tot_in
+        overall = (layer8_in - (tot_v + tot_out)) / layer8_in
+        assert overall == pytest.approx((1 - share) * nv_savings, abs=1e-6)
