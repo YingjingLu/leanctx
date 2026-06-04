@@ -9,7 +9,8 @@ trip through the middleware.
 
 It needs neither Node/ClawRouter nor the 1.2 GB Lingua model — routing is set
 to ``{}`` so compression falls through to Verbatim — so it runs in CI on every
-push, giving the benchmark suite at least one always-on integration gate.
+push (marked ``behavioral``, not ``integration``), giving the benchmark suite at
+least one always-on gate that exercises the real compress round-trip.
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ from benchmarks.clawrouter.bench_phase1 import (  # noqa: E402
     wait_for_health,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = pytest.mark.behavioral
 
 _PORT = 8473
 _URL = f"http://127.0.0.1:{_PORT}"

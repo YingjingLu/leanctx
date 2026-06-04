@@ -36,6 +36,8 @@ jobs:
       - name: Test (pytest)
         # integration tests require Node + a built ClawRouter; e2e tests require
         # provider API keys. Neither is provisioned in this job, so deselect them.
+        # unit + behavioral tests still run — behavioral boots the real sidecar
+        # over HTTP, so "green" exercises the actual compress round-trip.
         run: pytest -v -m "not integration and not e2e"
 
   build:
