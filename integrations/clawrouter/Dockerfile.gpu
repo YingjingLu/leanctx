@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1.7
+#
+# leanctx "Layer 8" serving sidecar for ClawRouter — GPU image.
+#
+# For production / RTX-class GPUs. Requires the NVIDIA Container Toolkit on the
+# host plus `--gpus all` (or compose's device reservation). Builds leanctx from
+# the in-repo source (no PyPI release needed).
+#
+# torch/CUDA must match your GPU. Defaults below target CUDA 12.4 (Ada/Hopper).
+# For Blackwell (RTX 50-series, e.g. 5090 / sm_120) you need torch >= 2.7 on
+# CUDA 12.8 — override the build args:
+#   --build-arg CUDA_IMAGE=nvidia/cuda:12.8.0-runtime-ubuntu22.04 \
+#   --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+#
+# Build from the repo root:
+#   docker build -f integrations/clawrouter/Dockerfile.gpu -t leanctx-layer8:gpu .
+# Run:
+#   docker run --gpus all -p 8459:8459 leanctx-layer8:gpu
+
+ARG CUDA_IMAGE=nvidia/cuda:12.4.1-runtime-ubuntu22.04
+FROM ${CUDA_IMAGE}
+
+ARG LINGUA_MODEL=microsoft/llmlingua-2-xlm-roberta-large-meetingbank
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/models \
+    DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip \
+ && rm -rf /var/lib/apt/lists/*
+
+# GPU torch from the matching CUDA index, in its own cached layer.
+RUN pip3 install --index-url ${TORCH_INDEX_URL} torch
+
+# Build leanctx from the in-repo source.
+WORKDIR /app
+COPY pyproject.toml README.md LICENSE ./
+COPY leanctx ./leanctx
+RUN pip3 install ".[server,lingua,tokens]"
+
+# Bake the weights at build time on CPU (no GPU in the build sandbox); the files
+# on disk are device-agnostic and load onto cuda at runtime.
+RUN python3 -c "from llmlingua import PromptCompressor; \
+PromptCompressor(model_name='${LINGUA_MODEL}', use_llmlingua2=True, device_map='cpu')"
+
+ENV HF_HUB_OFFLINE=1 \
+    LEANCTX_SERVER_MODE=on \
+    LEANCTX_SERVER_THRESHOLD=1500 \
+    LEANCTX_SERVER_LINGUA_RATIO=0.5 \
+    LEANCTX_SERVER_LINGUA_DEVICE=cuda \
+    LEANCTX_SERVER_DEDUP=off
+
+EXPOSE 8459
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+  CMD python3 -c "import urllib.request,sys; \
+sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8459/health').getcode()==200 else 1)"
+
+CMD ["leanctx-serve", "--host", "0.0.0.0", "--port", "8459", "--workers", "1"]

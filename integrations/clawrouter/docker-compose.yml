@@ -1,0 +1,54 @@
+# leanctx "Layer 8" sidecar for ClawRouter.
+#
+# Run from anywhere (the build context is the repo root, two levels up):
+#   cp integrations/clawrouter/.env.example integrations/clawrouter/.env   # optional
+#   docker compose -f integrations/clawrouter/docker-compose.yml up -d --build
+#   docker compose -f integrations/clawrouter/docker-compose.yml --profile gpu up -d --build
+#
+# ClawRouter (or any proxy) then POSTs to http://localhost:8459/compress.
+
+services:
+  leanctx-layer8:
+    build:
+      context: ../..
+      dockerfile: integrations/clawrouter/Dockerfile
+    image: leanctx-layer8:cpu
+    ports:
+      - "8459:8459"
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8459/health').getcode()==200 else 1)
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+
+  # GPU variant: `docker compose -f integrations/clawrouter/docker-compose.yml --profile gpu up -d`
+  leanctx-layer8-gpu:
+    profiles: ["gpu"]
+    build:
+      context: ../..
+      dockerfile: integrations/clawrouter/Dockerfile.gpu
+    image: leanctx-layer8:gpu
+    ports:
+      - "8459:8459"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LEANCTX_SERVER_LINGUA_DEVICE: cuda
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
