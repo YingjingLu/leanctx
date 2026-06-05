@@ -34,6 +34,8 @@ that were compressed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 from typing import Any
 
 from leanctx._content import get_text_content
@@ -41,6 +43,8 @@ from leanctx.observability.compressor_hooks import compressor_span
 from leanctx.observability.config import ObservabilityConfig
 from leanctx.stats import CompressionStats
 from leanctx.tokens import count_tokens
+
+logger = logging.getLogger("leanctx.lingua")
 
 _LINGUA_INSTALL_HINT = (
     "The 'llmlingua' package is required for leanctx.Lingua. "
@@ -273,5 +277,16 @@ class Lingua:
             model_name=self.model,
             use_llmlingua2=True,
             device_map=device,
+        )
+        # Log the actual device the model landed on so device claims in
+        # benchmark reports are verifiable from logs rather than assumed.
+        actual = device
+        with contextlib.suppress(Exception):  # model API may vary across versions
+            actual = str(next(self._prompt_compressor.model.parameters()).device)
+        logger.info(
+            "LLMLingua-2 loaded model=%s requested_device=%s actual_device=%s",
+            self.model,
+            device,
+            actual,
         )
         return self._prompt_compressor
