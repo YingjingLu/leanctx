@@ -1,0 +1,27 @@
+{
+  "name": "@leanctx/clawrouter-connector",
+  "version": "0.1.0",
+  "description": "leanctx 'Layer 8' connector for ClawRouter — POSTs prose to the leanctx sidecar for LLMLingua-2 compression, fail-open.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node test/smoke.mjs"
+  },
+  "keywords": ["leanctx", "clawrouter", "llmlingua", "prompt-compression"],
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0"
+  }
+}
