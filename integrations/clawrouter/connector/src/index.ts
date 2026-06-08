@@ -62,7 +62,12 @@ function envUrl(): string | undefined {
  * Always resolves; on any error/timeout/misconfiguration it returns the input
  * unchanged (fail-open). Message count and order are preserved.
  */
-export async function leanctxLayer8<M extends Layer8Message>(
+// Constraint is the structural minimum (role + content) rather than the full
+// `Layer8Message` interface: the latter's `[key: string]: unknown` index
+// signature blocks generic inference for callers whose message type lacks one
+// (e.g. ClawRouter's `NormalizedMessage`, whose `role` is a closed union), so
+// the documented `result = await leanctxLayer8(result)` wiring would not compile.
+export async function leanctxLayer8<M extends { role: string; content: unknown }>(
   messages: M[],
   options: Layer8Options = {},
 ): Promise<M[]> {
