@@ -405,6 +405,64 @@ def aggregate_verbatim_metrics(
     }
 
 
+def write_by_item_dumps(
+    out_dir: Path,
+    records_a: list[dict[str, Any]],
+    records_b: list[dict[str, Any]],
+    records_cb: list[dict[str, Any]],
+    msgs_a_by_id: dict[str, list[dict[str, Any]]],
+    msgs_b_by_id: dict[str, list[dict[str, Any]]],
+) -> list[Path]:
+    """Write one deep-dive JSON file per benchmark item under ``out_dir``.
+
+    Each file carries every field the flat JSONL holds for that item — the
+    Leg A record (CR only), the Leg B record (CR + leanctx Layer 8, already
+    enriched with the ``lx_*`` verbatim split), and the closed-book control
+    when present — plus the **full message payloads** on either side of
+    Layer 8 that the JSONL deliberately omits:
+
+      * ``input_before_layer8``  — the CR-only output, i.e. exactly what
+        leanctx saw as input inside Leg B (CR's 7 layers are deterministic).
+      * ``output_after_layer8``  — the CR + leanctx Layer 8 output.
+
+    Only items carrying an ``item_id`` are dumped (the agent warmup item has
+    none and is not tracked in the message sinks). Returns the files written.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _index(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        return {r["item_id"]: r for r in records if r.get("item_id") is not None}
+
+    a_by_id = _index(records_a)
+    b_by_id = _index(records_b)
+    cb_by_id = _index(records_cb)
+
+    item_ids = (
+        set(a_by_id) | set(b_by_id) | set(cb_by_id)
+        | set(msgs_a_by_id) | set(msgs_b_by_id)
+    )
+
+    written: list[Path] = []
+    for item_id in sorted(item_ids):
+        rec_a = a_by_id.get(item_id)
+        rec_b = b_by_id.get(item_id)
+        dump = {
+            "item_id": item_id,
+            "workload": (rec_b or rec_a or {}).get("workload"),
+            "leg_a": rec_a,
+            "leg_b": rec_b,
+            "leg_closed_book": cb_by_id.get(item_id),
+            "input_before_layer8": msgs_a_by_id.get(item_id),
+            "output_after_layer8": msgs_b_by_id.get(item_id),
+        }
+        # item_id is a dataset hash, but sanitize defensively for filesystem use.
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(item_id))
+        path = out_dir / f"{safe}.json"
+        path.write_text(json.dumps(dump, indent=2, ensure_ascii=False))
+        written.append(path)
+    return written
+
+
 def apply_gate(
     metrics: dict[str, Any],
     *,
@@ -1158,6 +1216,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-closed-book", dest="closed_book", action="store_false")
     parser.add_argument("--out", type=Path, default=Path("./phase1_results.jsonl"))
     parser.add_argument("--report", type=Path, default=Path("./phase1_report.md"))
+    parser.add_argument(
+        "--by-item-dir", type=Path, default=None,
+        help="Directory for per-item deep-dive dumps (full input before / output "
+             "after Layer 8 + all JSONL fields). Default: <out dir>/by_item.",
+    )
     args = parser.parse_args(argv)
 
     if args.dry_run_patch:
@@ -1316,6 +1379,13 @@ def main(argv: list[str] | None = None) -> int:
         for rec in records_a + records_b + records_cb:
             f.write(json.dumps(rec) + "\n")
 
+    # Write per-item deep-dive dumps (all JSONL fields + full input before /
+    # output after Layer 8). records_b carries the lx_* split merged above.
+    by_item_dir = args.by_item_dir or (args.out.parent / "by_item")
+    item_files = write_by_item_dumps(
+        by_item_dir, records_a, records_b, records_cb, msgs_a_by_id, msgs_b_by_id
+    )
+
     # Write report
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(report_text)
@@ -1323,6 +1393,7 @@ def main(argv: list[str] | None = None) -> int:
     print(report_text)
     print(f"\n[out] JSONL → {args.out}")
     print(f"[out] report → {args.report}")
+    print(f"[out] per-item dumps → {by_item_dir} ({len(item_files)} items)")
 
     return 0 if gate.passed else 1
 
