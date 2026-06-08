@@ -2,9 +2,10 @@
  * leanctx "Layer 8" connector for ClawRouter.
  *
  * Productizes the prose-compression hook the Phase-1 benchmark proved out
- * (see ../../benchmarks/clawrouter — the `LAYER8_TS_BLOCK`): after ClawRouter's
- * structural layers (1–7) produce the message list, hand it to the leanctx
- * sidecar for an LLMLingua-2 semantic pass, then take the result back.
+ * (../../benchmarks/clawrouter, which now imports this module rather than
+ * string-injecting its own copy): after ClawRouter's structural layers (1–7)
+ * produce the message list, hand it to the leanctx sidecar for an LLMLingua-2
+ * semantic pass, then take the result back.
  *
  * Design contract (matches the sidecar's POST /compress):
  *   - Same shape in, same shape out; message COUNT is preserved.

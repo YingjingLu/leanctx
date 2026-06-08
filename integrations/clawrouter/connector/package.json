@@ -15,7 +15,8 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node test/smoke.mjs"
+    "test": "npm run build && node --test test/unit.mjs",
+    "test:smoke": "npm run build && node test/smoke.mjs"
   },
   "keywords": ["leanctx", "clawrouter", "llmlingua", "prompt-compression"],
   "license": "MIT",
