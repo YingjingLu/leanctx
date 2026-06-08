@@ -4,8 +4,9 @@ The ClawRouter-side half of the integration: a small, typed, **fail-open** TypeS
 function that hands ClawRouter's post-Layer-7 messages to the [leanctx sidecar](../README.md)
 for an LLMLingua-2 semantic pass, then takes the compressed result back.
 
-It productizes the hook the [Phase-1 benchmark](../../../benchmarks/clawrouter) already
-proved out (the `LAYER8_TS_BLOCK` it string-injects) into a clean module you wire in once.
+It productizes the hook the [Phase-1 benchmark](../../../benchmarks/clawrouter) proved out
+into a clean module you wire in once — the benchmark now imports this connector rather than
+string-injecting its own copy of the Layer-8 hook.
 
 ## Contract
 
@@ -63,12 +64,18 @@ exactly as before.
 cd integrations/clawrouter/connector
 npm install
 npm run typecheck     # strict tsc, no emit
-npm test              # builds, then runs a behavioral smoke test against a live sidecar
+npm test              # builds, then runs the unit tests (mocked fetch, no infra)
+npm run test:smoke    # builds, then runs a behavioral test against a live sidecar
 ```
 
-`npm test` expects a sidecar on `http://localhost:8459` (override with `LEANCTX_SIDECAR_URL`).
-It asserts: prose compressed, tool message verbatim, count preserved, fail-open on an
-unreachable sidecar, and no-op when unconfigured.
+`npm test` (`test/unit.mjs`) mocks `globalThis.fetch`, so it runs in plain CI with no
+sidecar. It asserts: success returns the sidecar's messages, count-mismatch / non-ok
+responses fall back to the input, fail-open on a rejected fetch (with `onError`), the
+no-op-when-unconfigured path, the eligibility and `minChars` gates, and URL normalization.
+
+`npm run test:smoke` (`test/smoke.mjs`) expects a real sidecar on `http://localhost:8459`
+(override with `LEANCTX_SIDECAR_URL`) and asserts the end-to-end round-trip: prose
+compressed, tool message verbatim, count preserved.
 
 ## Why a connector + a sidecar (not one process)?
 

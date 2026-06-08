@@ -27,41 +27,30 @@ except ImportError:
 CR_REPO_URL = "https://github.com/BlockRunAI/ClawRouter.git"
 CR_DEFAULT_COMMIT = "89269507b2173200222d03c1d4a0f80665b525d1"
 
-# ── Layer 8 TypeScript block ───────────────────────────────────────────────
-# Inserted into src/compression/index.ts immediately before the anchor line
-#   const compressedChars = calculateTotalChars(result);
-# Enabled only when LEANCTX_SIDECAR_URL is present in the environment.
+# Productized Layer-8 connector — integrations/clawrouter/connector, published
+# as `@leanctx/clawrouter-connector`. The benchmark builds + installs this into
+# the cloned CR and imports it, instead of carrying its own hand-maintained copy
+# of the Layer-8 hook (the former LAYER8_TS_BLOCK). Single source of truth.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CONNECTOR_DIR = _REPO_ROOT / "integrations" / "clawrouter" / "connector"
+_CONNECTOR_PKG = "@leanctx/clawrouter-connector"
 
-LAYER8_TS_BLOCK = """\
-  // ── Layer 8: leanctx ML prose compression (opt-in) ──────────────────────
-  // Enabled only when LEANCTX_SIDECAR_URL is set in the environment.
-  // When unset, this block is a complete no-op — CR behaviour is unchanged.
-  const _leanctxUrl = process.env.LEANCTX_SIDECAR_URL;
-  if (_leanctxUrl) {
-    const _hasEligible = result.some(
-      (m: NormalizedMessage) =>
-        ["system", "user", "assistant"].includes(m.role) &&
-        typeof m.content === "string",
-    );
-    if (_hasEligible) {
-      try {
-        const _resp = await fetch(`${_leanctxUrl}/compress`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: result }),
-          signal: AbortSignal.timeout(60000),
-        });
-        if (_resp.ok) {
-          const _body = (await _resp.json()) as { messages?: NormalizedMessage[] };
-          if (Array.isArray(_body?.messages) && _body.messages.length === result.length) {
-            result = _body.messages;
-          }
-        }
-      } catch (_e) {
-        // sidecar timeout / unreachable — fall through with CR-only compression
-      }
-    }
-  }
+# ── Layer 8 injection ──────────────────────────────────────────────────────
+# The connector owns all the behaviour (env gate, eligibility, fetch, timeout,
+# fail-open, one-in-one-out guard). The patch just imports it and calls it
+# immediately before the anchor line
+#   const compressedChars = calculateTotalChars(result);
+# When LEANCTX_SIDECAR_URL is unset the connector is a no-op, so CR behaviour is
+# unchanged — exactly as a real ClawRouter user would wire it (see the
+# connector README).
+
+_LAYER8_IMPORT = f'import {{ leanctxLayer8 }} from "{_CONNECTOR_PKG}";\n'
+
+LAYER8_CALL_BLOCK = """\
+  // ── Layer 8: leanctx LLMLingua-2 prose pass (opt-in, fail-open) ──────────
+  // Productized connector (integrations/clawrouter/connector). No-op unless
+  // LEANCTX_SIDECAR_URL is set; any error/timeout returns `result` unchanged.
+  result = await leanctxLayer8(result);
   // ── end Layer 8 ──────────────────────────────────────────────────────────"""
 
 # ── CR shim — Node.js ESM source written into workdir during setup ─────────
@@ -133,10 +122,12 @@ def _patch_compression_ts(cr_dir: Path) -> None:
             f"Patch A anchor not found in {target}. "
             f"Expected: {_TS_ANCHOR!r}. Re-check --cr-commit."
         )
-    if "LEANCTX_SIDECAR_URL" in src:
+    if "leanctxLayer8" in src:
         return  # idempotent
-    target.write_text(src.replace(_TS_ANCHOR, LAYER8_TS_BLOCK + "\n" + _TS_ANCHOR))
-    print(f"[patch A] Layer 8 injected into {target.relative_to(cr_dir)}")
+    src = _LAYER8_IMPORT + src
+    src = src.replace(_TS_ANCHOR, LAYER8_CALL_BLOCK + "\n" + _TS_ANCHOR)
+    target.write_text(src)
+    print(f"[patch A] Layer 8 connector wired into {target.relative_to(cr_dir)}")
 
 
 def _patch_tsup_config(cr_dir: Path) -> None:
@@ -403,6 +394,64 @@ def aggregate_verbatim_metrics(
         "avg_nv_in": tot_in / n,
         "avg_nv_out": tot_out / n,
     }
+
+
+def write_by_item_dumps(
+    out_dir: Path,
+    records_a: list[dict[str, Any]],
+    records_b: list[dict[str, Any]],
+    records_cb: list[dict[str, Any]],
+    msgs_a_by_id: dict[str, list[dict[str, Any]]],
+    msgs_b_by_id: dict[str, list[dict[str, Any]]],
+) -> list[Path]:
+    """Write one deep-dive JSON file per benchmark item under ``out_dir``.
+
+    Each file carries every field the flat JSONL holds for that item — the
+    Leg A record (CR only), the Leg B record (CR + leanctx Layer 8, already
+    enriched with the ``lx_*`` verbatim split), and the closed-book control
+    when present — plus the **full message payloads** on either side of
+    Layer 8 that the JSONL deliberately omits:
+
+      * ``input_before_layer8``  — the CR-only output, i.e. exactly what
+        leanctx saw as input inside Leg B (CR's 7 layers are deterministic).
+      * ``output_after_layer8``  — the CR + leanctx Layer 8 output.
+
+    Only items carrying an ``item_id`` are dumped (the agent warmup item has
+    none and is not tracked in the message sinks). Returns the files written.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _index(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        return {r["item_id"]: r for r in records if r.get("item_id") is not None}
+
+    a_by_id = _index(records_a)
+    b_by_id = _index(records_b)
+    cb_by_id = _index(records_cb)
+
+    item_ids = (
+        set(a_by_id) | set(b_by_id) | set(cb_by_id)
+        | set(msgs_a_by_id) | set(msgs_b_by_id)
+    )
+
+    written: list[Path] = []
+    for item_id in sorted(item_ids):
+        rec_a = a_by_id.get(item_id)
+        rec_b = b_by_id.get(item_id)
+        dump = {
+            "item_id": item_id,
+            "workload": (rec_b or rec_a or {}).get("workload"),
+            "leg_a": rec_a,
+            "leg_b": rec_b,
+            "leg_closed_book": cb_by_id.get(item_id),
+            "input_before_layer8": msgs_a_by_id.get(item_id),
+            "output_after_layer8": msgs_b_by_id.get(item_id),
+        }
+        # item_id is a dataset hash, but sanitize defensively for filesystem use.
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(item_id))
+        path = out_dir / f"{safe}.json"
+        path.write_text(json.dumps(dump, indent=2, ensure_ascii=False))
+        written.append(path)
+    return written
 
 
 def apply_gate(
@@ -823,12 +872,32 @@ def spawn_leanctx_sidecar(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def install_connector(cr_dir: Path) -> None:
+    """Build the productized Layer-8 connector and install it into the CR clone.
+
+    The Layer-8 hook now lives in ``integrations/clawrouter/connector`` as
+    ``@leanctx/clawrouter-connector``; the benchmark no longer carries its own
+    copy. We build it (``tsc`` → ``dist``) and ``npm install`` it into the cloned
+    CR so tsup can resolve the ``leanctxLayer8`` import when bundling Layer 8.
+    """
+    if not _CONNECTOR_DIR.exists():
+        raise RuntimeError(
+            f"Layer-8 connector not found at {_CONNECTOR_DIR}. "
+            "Expected integrations/clawrouter/connector in the repo."
+        )
+    subprocess.run(["npm", "ci"], cwd=_CONNECTOR_DIR, check=True)
+    subprocess.run(["npm", "run", "build"], cwd=_CONNECTOR_DIR, check=True)
+    subprocess.run(["npm", "install", str(_CONNECTOR_DIR)], cwd=cr_dir, check=True)
+    print(f"[connector] built + installed {_CONNECTOR_PKG} from {_CONNECTOR_DIR}")
+
+
 def setup_clawrouter(workdir: Path, commit: str = CR_DEFAULT_COMMIT) -> None:
     workdir.mkdir(parents=True, exist_ok=True)
     if not (workdir / ".git").exists():
         subprocess.run(["git", "clone", CR_REPO_URL, str(workdir)], check=True)
     subprocess.run(["git", "checkout", commit], cwd=workdir, check=True)
     subprocess.run(["npm", "ci"], cwd=workdir, check=True)
+    install_connector(workdir)
     apply_patch(workdir)
     subprocess.run(["npm", "run", "build"], cwd=workdir, check=True)
 
@@ -1158,10 +1227,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-closed-book", dest="closed_book", action="store_false")
     parser.add_argument("--out", type=Path, default=Path("./phase1_results.jsonl"))
     parser.add_argument("--report", type=Path, default=Path("./phase1_report.md"))
+    parser.add_argument(
+        "--by-item-dir", type=Path, default=None,
+        help="Directory for per-item deep-dive dumps (full input before / output "
+             "after Layer 8 + all JSONL fields). Default: <out dir>/by_item.",
+    )
     args = parser.parse_args(argv)
 
     if args.dry_run_patch:
-        print(LAYER8_TS_BLOCK)
+        print(_LAYER8_IMPORT + LAYER8_CALL_BLOCK)
         return 0
 
     # Token-count validation. Savings figures derive from leanctx.tokens, which
@@ -1316,6 +1390,13 @@ def main(argv: list[str] | None = None) -> int:
         for rec in records_a + records_b + records_cb:
             f.write(json.dumps(rec) + "\n")
 
+    # Write per-item deep-dive dumps (all JSONL fields + full input before /
+    # output after Layer 8). records_b carries the lx_* split merged above.
+    by_item_dir = args.by_item_dir or (args.out.parent / "by_item")
+    item_files = write_by_item_dumps(
+        by_item_dir, records_a, records_b, records_cb, msgs_a_by_id, msgs_b_by_id
+    )
+
     # Write report
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(report_text)
@@ -1323,6 +1404,7 @@ def main(argv: list[str] | None = None) -> int:
     print(report_text)
     print(f"\n[out] JSONL → {args.out}")
     print(f"[out] report → {args.report}")
+    print(f"[out] per-item dumps → {by_item_dir} ({len(item_files)} items)")
 
     return 0 if gate.passed else 1
 

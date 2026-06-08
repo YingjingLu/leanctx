@@ -148,6 +148,7 @@ public LongBench v2 leaderboard.
 |----------|------|---------|-------------|
 | `--out PATH` | path | `./phase1_results.jsonl` | Path for per-item JSONL results. One line per workload item per leg (`A` = CR only, `B` = CR + leanctx, `C` = closed-book control), containing `leg`, `workload`, `item_id`, `tokens_raw`, `tokens_compressed`, `cr_compression_ratio`, `cr_stats` (per-layer breakdown), `compress_ms` (isolated sidecar latency), `eval_ms` (eval-LLM latency), `closed_book`, `accuracy`, `lb_gold`, `lb_pred`, `eval_input_tokens`, `duration_ms`. Append-safe across reruns if you use a new path each time. |
 | `--report PATH` | path | `./phase1_report.md` | Path for the human-readable Markdown report. Contains the go/no-go verdict, token compression table, LongBench accuracy breakdown by difficulty/length/domain, CR layer contributions, latency stats, and cost analysis. |
+| `--by-item-dir PATH` | path | `<out dir>/by_item` | Directory for per-item **deep-dive** dumps — one `<item_id>.json` per LongBench item carrying every JSONL field for that item (Leg A / Leg B / closed-book) **plus the full message payloads on either side of Layer 8** (`input_before_layer8`, `output_after_layer8`). Defaults next to `--out`. |
 
 ---
 
@@ -200,6 +201,30 @@ verbatim-excluded split (Phase B): how the item's Layer-8 input was routed.
 Layer-8 input; `lx_compressed_out_tokens` is the compressed size of the
 non-verbatim portion. These are computed post-run by replaying leanctx's real
 classifier on the Leg-A (CR-only) output, so they require no live sidecar.
+
+### `by_item/<item_id>.json`
+
+One file per LongBench item for deep-dive inspection. Unlike the flat JSONL —
+which records only token counts and metadata — these dumps include the **full
+message text** entering and leaving Layer 8, so you can read exactly what
+LLMLingua-2 did to a given item:
+
+```json
+{
+  "item_id": "lb_0042",
+  "workload": "lb_s1",
+  "leg_a": { "leg": "A", "tokens_compressed": 14830, "...": "(all Leg A JSONL fields)" },
+  "leg_b": { "leg": "B", "tokens_compressed": 7100, "lx_route": "lingua", "...": "(all Leg B JSONL fields)" },
+  "leg_closed_book": { "leg": "C", "accuracy": false, "...": "(or null if no closed-book leg)" },
+  "input_before_layer8":  [ { "role": "user", "content": "…CR-only output (what leanctx saw)…" } ],
+  "output_after_layer8":  [ { "role": "user", "content": "…CR + leanctx Layer 8 output…" } ]
+}
+```
+
+`input_before_layer8` is the CR-only (Leg A) output, which — because CR's 7
+layers are deterministic — is exactly the input leanctx saw inside Leg B.
+`output_after_layer8` is the Leg B output. The agent warmup item has no
+`item_id` and is not dumped.
 
 ### `phase1_report.md`
 

@@ -2,9 +2,10 @@
  * leanctx "Layer 8" connector for ClawRouter.
  *
  * Productizes the prose-compression hook the Phase-1 benchmark proved out
- * (see ../../benchmarks/clawrouter — the `LAYER8_TS_BLOCK`): after ClawRouter's
- * structural layers (1–7) produce the message list, hand it to the leanctx
- * sidecar for an LLMLingua-2 semantic pass, then take the result back.
+ * (../../benchmarks/clawrouter, which now imports this module rather than
+ * string-injecting its own copy): after ClawRouter's structural layers (1–7)
+ * produce the message list, hand it to the leanctx sidecar for an LLMLingua-2
+ * semantic pass, then take the result back.
  *
  * Design contract (matches the sidecar's POST /compress):
  *   - Same shape in, same shape out; message COUNT is preserved.
@@ -62,7 +63,12 @@ function envUrl(): string | undefined {
  * Always resolves; on any error/timeout/misconfiguration it returns the input
  * unchanged (fail-open). Message count and order are preserved.
  */
-export async function leanctxLayer8<M extends Layer8Message>(
+// Constraint is the structural minimum (role + content) rather than the full
+// `Layer8Message` interface: the latter's `[key: string]: unknown` index
+// signature blocks generic inference for callers whose message type lacks one
+// (e.g. ClawRouter's `NormalizedMessage`, whose `role` is a closed union), so
+// the documented `result = await leanctxLayer8(result)` wiring would not compile.
+export async function leanctxLayer8<M extends { role: string; content: unknown }>(
   messages: M[],
   options: Layer8Options = {},
 ): Promise<M[]> {

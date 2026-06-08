@@ -22,6 +22,7 @@ from benchmarks.clawrouter.bench_phase1 import (
     format_report,
     run_leg,
     verbatim_split_by_item,
+    write_by_item_dumps,
 )
 
 # ── _extract_lb_answer ──────────────────────────────────────────────────────
@@ -463,3 +464,70 @@ def test_format_report_omits_verbatim_section_when_absent():
         verbatim_metrics=None,
     )
     assert "Compression Excluding Verbatim Content" not in text
+
+
+# ── write_by_item_dumps ─────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_write_by_item_dumps_includes_all_fields_and_messages(tmp_path):
+    import json
+
+    records_a = [
+        {"leg": "A", "item_id": "abc", "workload": "lb_s1",
+         "tokens_compressed": 100, "accuracy": False},
+        # agent warmup item has no id — must be skipped
+        {"leg": "A", "item_id": None, "workload": "agent_s1",
+         "tokens_compressed": 9},
+    ]
+    records_b = [
+        {"leg": "B", "item_id": "abc", "workload": "lb_s1",
+         "tokens_compressed": 60, "accuracy": True, "lx_route": "lingua"},
+    ]
+    records_cb = [{"leg": "C", "item_id": "abc", "accuracy": True}]
+    msgs_a = {"abc": [{"role": "user", "content": "before layer 8"}]}
+    msgs_b = {"abc": [{"role": "user", "content": "after"}]}
+
+    out_dir = tmp_path / "by_item"
+    written = write_by_item_dumps(
+        out_dir, records_a, records_b, records_cb, msgs_a, msgs_b
+    )
+
+    # Only the item with an id is dumped.
+    assert [p.name for p in written] == ["abc.json"]
+    dump = json.loads(written[0].read_text())
+
+    # All JSONL fields are preserved per leg.
+    assert dump["leg_a"]["tokens_compressed"] == 100
+    assert dump["leg_b"]["lx_route"] == "lingua"
+    assert dump["leg_closed_book"]["accuracy"] is True
+    # Full messages on either side of Layer 8.
+    assert dump["input_before_layer8"][0]["content"] == "before layer 8"
+    assert dump["output_after_layer8"][0]["content"] == "after"
+
+
+@pytest.mark.unit
+def test_write_by_item_dumps_sanitizes_filename(tmp_path):
+    written = write_by_item_dumps(
+        tmp_path, [], [], [],
+        {"a/b:c": [{"role": "user", "content": "x"}]},
+        {"a/b:c": [{"role": "user", "content": "y"}]},
+    )
+    assert written[0].name == "a_b_c.json"
+
+
+@pytest.mark.unit
+def test_write_by_item_dumps_handles_missing_leg(tmp_path):
+    import json
+
+    # Item present only in the message sinks (no flat records) still dumps.
+    written = write_by_item_dumps(
+        tmp_path, [], [], [],
+        {"only": [{"role": "user", "content": "in"}]},
+        {},
+    )
+    dump = json.loads(written[0].read_text())
+    assert dump["leg_a"] is None
+    assert dump["leg_b"] is None
+    assert dump["output_after_layer8"] is None
+    assert dump["input_before_layer8"][0]["content"] == "in"

@@ -10,7 +10,7 @@ import re
 import pytest
 
 from benchmarks.clawrouter.bench_phase1 import (
-    LAYER8_TS_BLOCK,
+    LAYER8_CALL_BLOCK,
     apply_patch,
 )
 
@@ -62,8 +62,8 @@ def test_layer8_block_inserted_before_anchor(tmp_path):
     apply_patch(tmp_path)
     result = (tmp_path / "src" / "compression" / "index.ts").read_text()
 
-    assert LAYER8_TS_BLOCK in result
-    assert result.index(LAYER8_TS_BLOCK) < result.index(ANCHOR)
+    assert LAYER8_CALL_BLOCK in result
+    assert result.index(LAYER8_CALL_BLOCK) < result.index(ANCHOR)
 
 
 @pytest.mark.unit
@@ -89,36 +89,29 @@ def test_idempotent_no_double_patch(tmp_path):
     apply_patch(tmp_path)
     result = (tmp_path / "src" / "compression" / "index.ts").read_text()
 
-    assert result.count(LAYER8_TS_BLOCK) == 1
+    assert result.count(LAYER8_CALL_BLOCK) == 1
+    assert result.count("leanctxLayer8") == 2  # one import, one call
 
 
 @pytest.mark.unit
-def test_layer8_block_checks_env_var(tmp_path):
+def test_layer8_imports_productized_connector(tmp_path):
+    # Behaviour (env gate, timeout, fail-open, length guard) now lives in the
+    # `@leanctx/clawrouter-connector` package — the patch only imports + calls it.
     _setup_fake_cr(tmp_path)
     apply_patch(tmp_path)
     result = (tmp_path / "src" / "compression" / "index.ts").read_text()
 
-    assert "LEANCTX_SIDECAR_URL" in result
+    assert '@leanctx/clawrouter-connector' in result
+    assert "import { leanctxLayer8 }" in result
 
 
 @pytest.mark.unit
-def test_layer8_block_has_5s_timeout(tmp_path):
-    # Timeout raised to 60 000 ms so CPU-based Lingua inference (38 s) completes.
-    # GPU deployments finish in < 1 s; the 60-second limit is still a hard ceiling.
+def test_layer8_call_reassigns_result(tmp_path):
     _setup_fake_cr(tmp_path)
     apply_patch(tmp_path)
     result = (tmp_path / "src" / "compression" / "index.ts").read_text()
 
-    assert "AbortSignal.timeout(60000)" in result
-
-
-@pytest.mark.unit
-def test_layer8_block_guards_message_length(tmp_path):
-    _setup_fake_cr(tmp_path)
-    apply_patch(tmp_path)
-    result = (tmp_path / "src" / "compression" / "index.ts").read_text()
-
-    assert "result.length" in result
+    assert "result = await leanctxLayer8(result);" in result
 
 
 @pytest.mark.unit
