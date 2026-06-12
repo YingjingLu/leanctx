@@ -117,6 +117,49 @@ def test_e2e_report_written_to_disk(full_pipeline, tmp_path):
 
 
 @pytest.mark.e2e
+def test_e2e_route_accuracy_section_and_shared_eval_draw(tmp_path):
+    """Phase D: main() emits the by-route accuracy table, and Leg B records
+    carry the ``eval_reused`` flag. Verbatim-routed items must reuse Leg A's
+    draw (eval_reused True) and therefore agree with Leg A on accuracy."""
+    import json
+
+    from benchmarks.clawrouter.bench_phase1 import main
+
+    out_path = tmp_path / "route.jsonl"
+    report_path = tmp_path / "route_report.md"
+
+    main([
+        "--skip-setup",
+        "--workdir", "/tmp/clawrouter_intg_test",
+        "--lb-stages", "1",
+        "--lb-n", "4",
+        "--agent-stages", "1",
+        "--no-closed-book",
+        "--shim-port", "8477",
+        "--out", str(out_path),
+        "--report", str(report_path),
+    ])
+
+    report_text = report_path.read_text()
+    assert "By leanctx route" in report_text, \
+        f"route accuracy section missing from report:\n{report_text[:800]}"
+
+    rows = [json.loads(line) for line in out_path.read_text().splitlines()]
+    by_id_a = {r["item_id"]: r for r in rows
+               if r["leg"] == "A" and r.get("item_id") and r.get("accuracy") is not None}
+    leg_b = [r for r in rows
+             if r["leg"] == "B" and r.get("item_id") and r.get("accuracy") is not None]
+
+    assert leg_b, "no scored Leg B records found"
+    for r in leg_b:
+        assert "eval_reused" in r, "Leg B record missing eval_reused flag"
+        if r.get("lx_route") == "verbatim" and r["eval_reused"]:
+            # Reused draw ⇒ identical answer ⇒ identical accuracy to Leg A.
+            assert r["accuracy"] == by_id_a[r["item_id"]]["accuracy"], \
+                "verbatim+reused item must match Leg A accuracy exactly"
+
+
+@pytest.mark.e2e
 def test_e2e_verbatim_split_section_and_jsonl(tmp_path):
     """Phase B: main() emits the verbatim-excluded section and per-item lx_*
     fields in the JSONL, and the decomposition identity holds on real data."""

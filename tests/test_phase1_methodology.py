@@ -7,17 +7,22 @@ All marked unit — no real network, no real model, no real dataset.
 """
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 import benchmarks.clawrouter.bench_phase1 as harness
 from benchmarks.clawrouter.bench_phase1 import (
     GateResult,
+    _build_eval_context,
     _extract_lb_answer,
     _load_lb_items,
     _percentile,
     _sum_tokens,
     _verbatim_split_item,
     aggregate_verbatim_metrics,
+    call_eval_llm,
     compute_metrics,
     format_report,
     run_leg,
@@ -161,6 +166,179 @@ def test_run_leg_closed_book_skips_shim(monkeypatch, lb_item):
     assert seen["closed_book"] is True
     assert rec["closed_book"] is True
     assert rec["compress_ms"] == 0
+
+
+# ── _build_eval_context ─────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_build_eval_context_joins_text_roles():
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "world"},
+        {"role": "tool", "content": "ignored-role"},
+        {"role": "user", "content": [{"type": "text", "text": "blocks-ignored"}]},
+    ]
+    ctx = _build_eval_context(msgs)
+    assert "hello" in ctx and "world" in ctx
+    assert "ignored-role" not in ctx  # role not in {user,system,assistant}
+    assert "blocks-ignored" not in ctx  # non-string content skipped
+
+
+@pytest.mark.unit
+def test_build_eval_context_closed_book_is_placeholder():
+    msgs = [{"role": "user", "content": "should not appear"}]
+    assert _build_eval_context(msgs, closed_book=True) == "[no document provided]"
+    assert "should not appear" not in _build_eval_context(msgs, closed_book=True)
+
+
+# ── call_eval_llm: low eval temperature ─────────────────────────────────────
+
+
+def _fake_anthropic(captured: dict, *, text: str = "The correct answer is (B)"):
+    """A stand-in ``anthropic`` module whose client records create() kwargs."""
+    class _Resp:
+        content = [types.SimpleNamespace(text=text)]
+        usage = types.SimpleNamespace(input_tokens=42)
+
+    class _Messages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _Resp()
+
+    class _Client:
+        def __init__(self):
+            self.messages = _Messages()
+
+    mod = types.ModuleType("anthropic")
+    mod.Anthropic = _Client
+    return mod
+
+
+def _fake_openai(captured: dict, *, text: str = "The correct answer is (B)"):
+    class _Resp:
+        choices = [types.SimpleNamespace(message=types.SimpleNamespace(content=text))]
+        usage = types.SimpleNamespace(prompt_tokens=42)
+
+    class _Completions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _Resp()
+
+    class _Chat:
+        def __init__(self):
+            self.completions = _Completions()
+
+    class _Client:
+        def __init__(self):
+            self.chat = _Chat()
+
+    mod = types.ModuleType("openai")
+    mod.OpenAI = _Client
+    return mod
+
+
+@pytest.fixture
+def eval_call_item():
+    return {
+        "question": "q?", "choice_A": "a", "choice_B": "b",
+        "choice_C": "c", "choice_D": "d", "gold": "B",
+    }
+
+
+@pytest.mark.unit
+def test_call_eval_llm_anthropic_uses_low_temperature(monkeypatch, eval_call_item):
+    captured: dict = {}
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(captured))
+    answer, in_tok = call_eval_llm(
+        [{"role": "user", "content": "doc"}],
+        eval_call_item,
+        {"provider": "anthropic", "model": "m", "max_tokens": 16},
+    )
+    assert captured["temperature"] == 0.1
+    assert answer == "B"
+    assert in_tok == 42
+
+
+@pytest.mark.unit
+def test_call_eval_llm_openai_uses_low_temperature(monkeypatch, eval_call_item):
+    captured: dict = {}
+    monkeypatch.setitem(sys.modules, "openai", _fake_openai(captured))
+    answer, in_tok = call_eval_llm(
+        [{"role": "user", "content": "doc"}],
+        eval_call_item,
+        {"provider": "openai", "model": "m", "max_tokens": 16},
+    )
+    assert captured["temperature"] == 0.1
+    assert answer == "B"
+    assert in_tok == 42
+
+
+# ── run_leg: shared eval draw (de-biasing) ──────────────────────────────────
+
+
+@pytest.mark.unit
+def test_run_leg_reuses_eval_for_identical_context(monkeypatch, lb_item):
+    """Leg B reuses Leg A's answer when the eval context is byte-identical —
+    no second judge call, and the reused flag is recorded."""
+    monkeypatch.setattr(
+        harness, "compress_via_shim",
+        lambda messages, url: {"messages": messages, "stats": {}},
+    )
+    calls = {"n": 0}
+
+    def counting_eval(compressed, item, cfg, *, closed_book=False):
+        calls["n"] += 1
+        return ("B", 7)
+
+    monkeypatch.setattr(harness, "call_eval_llm", counting_eval)
+
+    eval_a: dict = {}
+    [rec_a] = run_leg(
+        "A", [lb_item], "http://x", lb_cfg={"provider": "anthropic"}, eval_sink=eval_a
+    )
+    assert calls["n"] == 1
+    assert rec_a["eval_reused"] is False
+    assert eval_a[lb_item["item_id"]]["answer"] == "B"
+
+    # Leg B sees the same compressed messages → identical context → reuse.
+    [rec_b] = run_leg(
+        "B", [lb_item], "http://x", lb_cfg={"provider": "anthropic"}, reuse_eval=eval_a
+    )
+    assert calls["n"] == 1, "judge must not be called again for identical input"
+    assert rec_b["eval_reused"] is True
+    assert rec_b["accuracy"] is True
+    assert rec_b["lb_pred"] == "B"
+    assert rec_b["eval_input_tokens"] == 7
+    assert rec_b["eval_ms"] == 0
+
+
+@pytest.mark.unit
+def test_run_leg_does_not_reuse_when_context_differs(monkeypatch, lb_item):
+    """Genuinely-compressed items (different context) get a fresh draw."""
+    monkeypatch.setattr(
+        harness, "compress_via_shim",
+        lambda messages, url: {"messages": messages, "stats": {}},
+    )
+    calls = {"n": 0}
+
+    def counting_eval(compressed, item, cfg, *, closed_book=False):
+        calls["n"] += 1
+        return ("B", 7)
+
+    monkeypatch.setattr(harness, "call_eval_llm", counting_eval)
+
+    eval_a: dict = {}
+    run_leg("A", [lb_item], "http://x", lb_cfg={"provider": "anthropic"}, eval_sink=eval_a)
+    assert calls["n"] == 1
+
+    # Same item_id but a different (compressed) document → context differs.
+    item_b = {**lb_item, "messages": [{"role": "user", "content": "a much shorter doc"}]}
+    [rec_b] = run_leg(
+        "B", [item_b], "http://x", lb_cfg={"provider": "anthropic"}, reuse_eval=eval_a
+    )
+    assert calls["n"] == 2, "differing context must trigger a fresh judge call"
+    assert rec_b["eval_reused"] is False
 
 
 # ── _percentile ─────────────────────────────────────────────────────────────

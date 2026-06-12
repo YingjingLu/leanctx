@@ -477,6 +477,57 @@ def apply_gate(
     return GateResult(passed=True)
 
 
+def acc_by_route(
+    records_a: list[dict[str, Any]],
+    records_b: list[dict[str, Any]],
+) -> list[tuple[str, int, float, float]]:
+    """Accuracy split by leanctx route — ``verbatim`` / ``lingua`` / ``hybrid``
+    plus an ``overall`` row — as ``(label, N, acc_a, acc_b)``.
+
+    Only Leg B carries ``lx_route``; each item's route is joined back onto the
+    Leg A record by ``item_id`` so both legs are compared on the *same*
+    partition. This is the lens that separates real compression effects (the
+    ``lingua`` row, where leanctx actually rewrote the context) from eval noise
+    on untouched items (the ``verbatim`` row, which — with the shared eval draw —
+    is pinned to Δ = 0 by construction). Items lacking a route or an accuracy on
+    either leg are skipped.
+    """
+    route_by_id = {
+        r.get("item_id"): r.get("lx_route")
+        for r in records_b
+        if r.get("item_id") is not None and r.get("lx_route")
+    }
+    a_by_id = {r.get("item_id"): r for r in records_a if r.get("item_id") is not None}
+    b_by_id = {r.get("item_id"): r for r in records_b if r.get("item_id") is not None}
+
+    buckets: dict[str, list[tuple[bool, bool]]] = {}
+    overall: list[tuple[bool, bool]] = []
+    for item_id, route in route_by_id.items():
+        ra, rb = a_by_id.get(item_id), b_by_id.get(item_id)
+        if ra is None or rb is None:
+            continue
+        if ra.get("accuracy") is None or rb.get("accuracy") is None:
+            continue
+        pair = (bool(ra["accuracy"]), bool(rb["accuracy"]))
+        buckets.setdefault(route, []).append(pair)
+        overall.append(pair)
+
+    def _row(label: str, pairs: list[tuple[bool, bool]]) -> tuple[str, int, float, float]:
+        n = len(pairs)
+        acc_a = sum(a for a, _ in pairs) / n if n else 0.0
+        acc_b = sum(b for _, b in pairs) / n if n else 0.0
+        return (label, n, acc_a, acc_b)
+
+    rows = [
+        _row(route, buckets[route])
+        for route in ("verbatim", "lingua", "hybrid")
+        if route in buckets
+    ]
+    if overall:
+        rows.append(_row("overall", overall))
+    return rows
+
+
 def format_report(
     metrics: dict[str, Any],
     gate: GateResult,
@@ -702,6 +753,21 @@ def format_report(
                 A("> ⚠️  Leg B accuracy does not beat the closed-book baseline — "
                   "the compressed context may not be carrying the answer. Treat the "
                   "accuracy result with caution.")
+            A("")
+        route_rows = acc_by_route(lb_a, lb_b)
+        if route_rows:
+            A("### By leanctx route")
+            A("")
+            A("_`verbatim` = leanctx passed the context through unchanged; "
+              "`lingua` = leanctx actually compressed it. With the shared eval "
+              "draw, identical-input (verbatim) items score identically on both "
+              "legs, so any non-zero Δ here lives entirely in `lingua`._")
+            A("")
+            A("| route | N | Leg A | Leg B | Δ |")
+            A("|---|---|---|---|---|")
+            for label, n, ra, rb in route_rows:
+                disp = f"**{label}**" if label == "overall" else label
+                A(f"| {disp} | {n} | {pct(ra)} | {pct(rb)} | {pct(rb - ra)} |")
             A("")
         diff_bd = _acc_breakdown(lb_a, "lb_difficulty")
         diff_bd_b = _acc_breakdown(lb_b, "lb_difficulty")
@@ -1028,6 +1094,40 @@ def _sum_tokens(messages: list[dict]) -> int:
     return count_tokens(combined)
 
 
+def _build_eval_context(
+    compressed_messages: list[dict],
+    *,
+    closed_book: bool = False,
+) -> str:
+    """Assemble the ``$DOC$`` context string the eval prompt is built from.
+
+    Factored out of ``call_eval_llm`` so ``run_leg`` can compute the *same*
+    string as a cache key for the shared-eval-draw optimisation: two legs whose
+    compressed messages yield an identical context are guaranteed to send an
+    identical prompt to the judge, so the second leg can reuse the first leg's
+    answer instead of drawing a fresh (and, at temperature > 0, noisy) sample.
+    """
+    if closed_book:
+        return "[no document provided]"
+    return _lb_head_tail(
+        " ".join(
+            m["content"]
+            for m in compressed_messages
+            if isinstance(m.get("content"), str)
+            and m.get("role") in ("user", "system", "assistant")
+        ).strip()
+    )
+
+
+# Eval decoding temperature. LongBench scoring is a single-letter multiple-choice
+# task; we want the judge as close to deterministic as practical so that the
+# per-item accuracy signal reflects the *context* (and thus compression), not
+# decoder sampling. 0.1 (rather than 0.0) keeps a hair of slack for providers
+# that treat exactly-0 specially, while collapsing the ~20% identical-input flip
+# rate observed at the API default of 1.0.
+_EVAL_TEMPERATURE = 0.1
+
+
 def call_eval_llm(
     compressed_messages: list[dict],
     item: dict,
@@ -1043,17 +1143,7 @@ def call_eval_llm(
 
     Returns (predicted_letter | None, input_tokens).
     """
-    if closed_book:
-        context = "[no document provided]"
-    else:
-        context = _lb_head_tail(
-            " ".join(
-                m["content"]
-                for m in compressed_messages
-                if isinstance(m.get("content"), str)
-                and m.get("role") in ("user", "system", "assistant")
-            ).strip()
-        )
+    context = _build_eval_context(compressed_messages, closed_book=closed_book)
 
     prompt = (
         _LB_PROMPT_TEMPLATE
@@ -1079,6 +1169,7 @@ def call_eval_llm(
                 resp = client.messages.create(
                     model=model,
                     max_tokens=max_tokens,
+                    temperature=_EVAL_TEMPERATURE,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 text = resp.content[0].text if resp.content else ""
@@ -1090,6 +1181,7 @@ def call_eval_llm(
                 resp = client.chat.completions.create(
                     model=model,
                     max_tokens=max_tokens,
+                    temperature=_EVAL_TEMPERATURE,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 text = resp.choices[0].message.content or ""
@@ -1117,7 +1209,19 @@ def run_leg(
     *,
     closed_book: bool = False,
     msg_sink: dict[str, list[dict[str, Any]]] | None = None,
+    reuse_eval: dict[str, dict[str, Any]] | None = None,
+    eval_sink: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Run one benchmark leg.
+
+    Shared eval draw (de-biasing): when ``reuse_eval`` is supplied (the prior
+    leg's ``eval_sink``) and this item's eval context is byte-identical to the
+    context the prior leg scored, the prior leg's answer is reused verbatim
+    instead of issuing a fresh judge call. This makes verbatim-routed items —
+    where leanctx changed nothing — contribute Δacc = 0 by construction, instead
+    of injecting decoder noise. ``eval_sink`` records this leg's (context,
+    answer, tokens) per item so a later leg can reuse them.
+    """
     records = []
     for item in items:
         t0 = time.perf_counter()
@@ -1159,11 +1263,25 @@ def run_leg(
             "accuracy": None,
         }
         if lb_cfg and item.get("question"):
-            t_eval0 = time.perf_counter()
-            answer, in_tok = call_eval_llm(
-                compressed, item, lb_cfg, closed_book=closed_book
+            context_key = _build_eval_context(compressed, closed_book=closed_book)
+            prev = (
+                reuse_eval.get(item_id)
+                if reuse_eval is not None and item_id is not None
+                else None
             )
-            rec["eval_ms"] = int((time.perf_counter() - t_eval0) * 1000)
+            if prev is not None and prev.get("context") == context_key:
+                # Identical prompt to the prior leg → reuse its draw (no judge
+                # call, no decoder noise). eval_ms is 0 because nothing ran.
+                answer, in_tok = prev["answer"], prev["in_tok"]
+                rec["eval_ms"] = 0
+                rec["eval_reused"] = True
+            else:
+                t_eval0 = time.perf_counter()
+                answer, in_tok = call_eval_llm(
+                    compressed, item, lb_cfg, closed_book=closed_book
+                )
+                rec["eval_ms"] = int((time.perf_counter() - t_eval0) * 1000)
+                rec["eval_reused"] = False
             rec["accuracy"] = answer == item.get("gold")
             rec["lb_gold"] = item.get("gold")
             rec["lb_pred"] = answer
@@ -1171,6 +1289,12 @@ def run_leg(
             rec["lb_domain"] = item.get("lb_domain", "")
             rec["lb_difficulty"] = item.get("lb_difficulty", "")
             rec["lb_length"] = item.get("lb_length", "")
+            if eval_sink is not None and item_id is not None:
+                eval_sink[item_id] = {
+                    "context": context_key,
+                    "answer": answer,
+                    "in_tok": in_tok,
+                }
         rec["duration_ms"] = int((time.perf_counter() - t0) * 1000)
         records.append(rec)
     return records
@@ -1283,6 +1407,10 @@ def main(argv: list[str] | None = None) -> int:
     # Compressed-message sinks for the verbatim split (Phase B).
     msgs_a_by_id: dict[str, list[dict[str, Any]]] = {}
     msgs_b_by_id: dict[str, list[dict[str, Any]]] = {}
+    # Leg A's per-item eval draws (context + answer + tokens). Leg B reuses an
+    # entry whenever its eval context is identical, collapsing decoder noise on
+    # verbatim-routed items to exactly zero.
+    eval_a_by_id: dict[str, dict[str, Any]] = {}
 
     records_a: list[dict[str, Any]] = []
     try:
@@ -1305,7 +1433,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"[leg A] Running lb_s1 ({n} items) …")
             records_a.extend(
-                run_leg("A", lb_items, shim_a_url, lb_cfg=eval_cfg, msg_sink=msgs_a_by_id)
+                run_leg(
+                    "A", lb_items, shim_a_url, lb_cfg=eval_cfg,
+                    msg_sink=msgs_a_by_id, eval_sink=eval_a_by_id,
+                )
             )
     finally:
         shim_a.terminate()
@@ -1330,7 +1461,10 @@ def main(argv: list[str] | None = None) -> int:
             # reuse same LB items from Leg A
             print(f"[leg B] Running lb_s1 ({len(lb_items)} items) …")
             records_b.extend(
-                run_leg("B", lb_items, shim_b_url, lb_cfg=eval_cfg, msg_sink=msgs_b_by_id)
+                run_leg(
+                    "B", lb_items, shim_b_url, lb_cfg=eval_cfg,
+                    msg_sink=msgs_b_by_id, reuse_eval=eval_a_by_id,
+                )
             )
     finally:
         shim_b.terminate()
