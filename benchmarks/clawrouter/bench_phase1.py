@@ -620,23 +620,45 @@ def format_report(
         ("L7 Codebook",   "dynamicSubstitutions",     _avg_stat("dynamicSubstitutions")),
     ]
 
-    # accuracy breakdown helpers
-    def _acc_breakdown(records: list[dict], key: str) -> dict[str, tuple[int, float]]:
-        cells: dict[str, list[bool]] = {}
-        for r in records:
-            val = r.get(key, "") or "unknown"
-            acc = r.get("accuracy")
-            if acc is not None:
-                cells.setdefault(val, []).append(bool(acc))
-        return {k: (len(v), sum(v) / len(v)) for k, v in sorted(cells.items())}
+    # accuracy breakdown helper — each metadata bucket (e.g. easy/hard) is
+    # further split by leanctx route, so the verbatim row (Δ pinned to 0 by the
+    # shared eval draw) is separated from the lingua row (the genuine
+    # compression signal), with a per-bucket overall row. Route is carried only
+    # by Leg B; both legs are compared on the same item partition by item_id.
+    def _acc_table_by_route(key: str) -> list[str]:
+        route_by_id = {
+            r.get("item_id"): r.get("lx_route")
+            for r in lb_b
+            if r.get("item_id") is not None and r.get("lx_route")
+        }
+        a_by_id = {r.get("item_id"): r for r in lb_a if r.get("item_id") is not None}
+        b_by_id = {r.get("item_id"): r for r in lb_b if r.get("item_id") is not None}
 
-    def _acc_table(breakdown_a: dict, breakdown_b: dict) -> list[str]:
-        keys = sorted(set(breakdown_a) | set(breakdown_b))
-        rows = ["| | N | Leg A | Leg B | Δ |", "|---|---|---|---|---|"]
-        for k in keys:
-            n, a = breakdown_a.get(k, (0, 0.0))
-            _, b = breakdown_b.get(k, (0, 0.0))
-            rows.append(f"| {k} | {n} | {pct(a)} | {pct(b)} | {pct(b-a)} |")
+        buckets: dict[str, dict[str, list[tuple[bool, bool]]]] = {}
+        for item_id, route in route_by_id.items():
+            ra, rb = a_by_id.get(item_id), b_by_id.get(item_id)
+            if ra is None or rb is None:
+                continue
+            if ra.get("accuracy") is None or rb.get("accuracy") is None:
+                continue
+            bucket = ra.get(key, "") or "unknown"
+            pair = (bool(ra["accuracy"]), bool(rb["accuracy"]))
+            buckets.setdefault(bucket, {}).setdefault(route, []).append(pair)
+
+        def _cells(pairs: list[tuple[bool, bool]]) -> str:
+            n = len(pairs)
+            aa = sum(a for a, _ in pairs) / n
+            bb = sum(b for _, b in pairs) / n
+            return f"{n} | {pct(aa)} | {pct(bb)} | {pct(bb - aa)}"
+
+        rows = ["| | route | N | Leg A | Leg B | Δ |", "|---|---|---|---|---|---|"]
+        for bucket in sorted(buckets):
+            routes = buckets[bucket]
+            for route in ("verbatim", "lingua", "hybrid"):
+                if route in routes:
+                    rows.append(f"| {bucket} | {route} | {_cells(routes[route])} |")
+            overall = [p for ps in routes.values() for p in ps]
+            rows.append(f"| {bucket} | **overall** | {_cells(overall)} |")
         return rows
 
     def _ms(v: float | None) -> str:
@@ -769,60 +791,23 @@ def format_report(
                 disp = f"**{label}**" if label == "overall" else label
                 A(f"| {disp} | {n} | {pct(ra)} | {pct(rb)} | {pct(rb - ra)} |")
             A("")
-        diff_bd = _acc_breakdown(lb_a, "lb_difficulty")
-        diff_bd_b = _acc_breakdown(lb_b, "lb_difficulty")
-        if diff_bd:
-            A("### By difficulty")
-            A("")
-            out.extend(_acc_table(diff_bd, diff_bd_b))
-            A("")
-        len_bd = _acc_breakdown(lb_a, "lb_length")
-        len_bd_b = _acc_breakdown(lb_b, "lb_length")
-        if len_bd:
-            A("### By length")
-            A("")
-            out.extend(_acc_table(len_bd, len_bd_b))
-            A("")
-        dom_bd = _acc_breakdown(lb_a, "lb_domain")
-        dom_bd_b = _acc_breakdown(lb_b, "lb_domain")
-        if dom_bd:
-            A("### By domain")
-            A("")
-            out.extend(_acc_table(dom_bd, dom_bd_b))
-            A("")
+        for _hdr, _key in (
+            ("By difficulty", "lb_difficulty"),
+            ("By length", "lb_length"),
+            ("By domain", "lb_domain"),
+        ):
+            tbl = _acc_table_by_route(_key)
+            if len(tbl) > 2:  # header + separator only ⇒ no data to show
+                A(f"### {_hdr}")
+                A("")
+                out.extend(tbl)
+                A("")
     else:
         A("_No LongBench items in this run._")
         A("")
 
-    # 4. Per-workload breakdown
-    A("## 4. Per-Workload Breakdown")
-    A("")
-    workloads = sorted({r.get("workload", "unknown") for r in records_a})
-    A("| Workload | Items | tokens_A | tokens_B | Δ tokens |"
-      + (" Acc A | Acc B | Δ acc |" if n_lb > 0 else ""))
-    A("|----------|-------|----------|----------|----------|"
-      + ("-------|-------|-------|" if n_lb > 0 else ""))
-    for wl in workloads:
-        wa = [r for r in records_a if r.get("workload") == wl]
-        wb = [r for r in records_b if r.get("workload") == wl]
-        if not wa or not wb:
-            continue
-        ta = sum(r["tokens_compressed"] for r in wa)
-        tb = sum(r["tokens_compressed"] for r in wb)
-        dt = pct((ta - tb) / ta) if ta > 0 else "N/A"
-        row = f"| {wl} | {len(wa)} | {ta:,} | {tb:,} | {dt} |"
-        if n_lb > 0:
-            wa_lb = [r for r in wa if r.get("accuracy") is not None]
-            wb_lb = [r for r in wb if r.get("accuracy") is not None]
-            aa = sum(r["accuracy"] for r in wa_lb) / len(wa_lb) if wa_lb else None
-            ab = sum(r["accuracy"] for r in wb_lb) / len(wb_lb) if wb_lb else None
-            row += (f" {pct(aa)} | {pct(ab)} | {pct((ab or 0) - (aa or 0))} |"
-                    if aa is not None else " — | — | — |")
-        A(row)
-    A("")
-
-    # 5. CR layer contribution (Leg A)
-    A("## 5. ClawRouter Layer Contributions (Leg A avg)")
+    # 4. CR layer contribution (Leg A)
+    A("## 4. ClawRouter Layer Contributions (Leg A avg)")
     A("")
     A("| Layer | Statistic | Avg value |")
     A("|-------|-----------|-----------|")
@@ -834,8 +819,8 @@ def format_report(
     A(f"| **L8 leanctx** | Δ tokens / item | **{layer8_delta:,.0f}** |")
     A("")
 
-    # 6. Latency
-    A("## 6. Latency")
+    # 5. Latency
+    A("## 5. Latency")
     A("")
     A("_Sidecar = the Layer 8 compression call in isolation (Leg B). Eval LLM "
       "time is shown separately and is **not** part of the sidecar figure._")
@@ -846,8 +831,8 @@ def format_report(
     A(f"| Eval LLM (LongBench answer) | {eval_p50_str} | {eval_p95_str} |")
     A("")
 
-    # 7. Cost analysis
-    A("## 7. Cost Analysis")
+    # 6. Cost analysis
+    A("## 6. Cost Analysis")
     A("")
     cost = metrics.get("cost_saved_per_1k", 0.0)
     delta_t = metrics.get("delta_tokens", 0.0)
