@@ -206,20 +206,17 @@ _LB_ITEM = {
 
 
 @pytest.mark.unit
-def test_build_lb_prompt_open_book_has_no_forced_choice():
-    prompt = _build_lb_prompt(_LB_ITEM, "the document", closed_book=False)
-    assert "the document" in prompt
-    assert "must still answer" not in prompt  # no forced-choice rider open-book
-
-
-@pytest.mark.unit
-def test_build_lb_prompt_closed_book_forces_a_letter():
-    prompt = _build_lb_prompt(_LB_ITEM, "[no document provided]", closed_book=True)
-    # The rider must tell the model to guess rather than abstain, so a hedge
-    # does not get scored below the 25% random floor (inflating context lift).
-    assert "must still answer" in prompt
-    assert "never" in prompt and "cannot answer" in prompt
-    assert prompt.rstrip().endswith('"The correct answer is (X)".')
+def test_build_lb_prompt_forces_a_letter_in_both_legs():
+    # The forced-choice instruction lives in the shared template, so a hedge is
+    # never scored below the 25% random floor (which would inflate context lift)
+    # regardless of leg — and the prompt is byte-identical apart from $DOC$.
+    open_book = _build_lb_prompt(_LB_ITEM, "the document")
+    closed_book = _build_lb_prompt(_LB_ITEM, "[no document provided]")
+    for prompt in (open_book, closed_book):
+        assert "must commit to exactly one option" in prompt
+        assert "never reply that you cannot answer" in prompt
+    # Identical scaffolding: the only difference is the $DOC$ slot.
+    assert open_book.replace("the document", "[no document provided]") == closed_book
 
 
 # ── call_eval_llm: low eval temperature ─────────────────────────────────────

@@ -979,40 +979,40 @@ def compress_via_shim(messages: list[dict], shim_url: str) -> dict:
 # Sprint 7 — Leg runner & CLI
 # ═══════════════════════════════════════════════════════════════════════════
 
-# LongBench v2 prompt template (mirrors THUDM/LongBench pred.py)
+# LongBench v2 prompt template (mirrors THUDM/LongBench pred.py).
+#
+# The forced-choice sentence is a deliberate addition to the upstream template:
+# without it the eval model hedges ("I can't answer without the text") whenever
+# the context is thin or absent, and the extraction regex scores that as a miss.
+# In the closed-book control that dragged accuracy *below* the 25% random-chance
+# floor for a 4-way MC, inflating the apparent context lift. Requiring a single
+# best-guess letter every time makes the control reflect the model's actual
+# prior rather than its willingness to abstain. It lives in the shared template
+# (not a closed-book-only rider) so both legs see a byte-identical instruction —
+# the A/B differs only in $DOC$, never in the prompt scaffolding.
 _LB_PROMPT_TEMPLATE = (
     "Please read the following text and answer the question below.\n\n"
     "<text>\n$DOC$\n</text>\n\n"
     "What is the correct answer to this question: $Q$\n"
     "Choices:\n"
     "(A) $C_A$\n(B) $C_B$\n(C) $C_C$\n(D) $C_D$\n\n"
+    "You must commit to exactly one option even if the text is thin or missing: "
+    "pick the single most likely choice from the text and your own best guess, "
+    "and never reply that you cannot answer.\n"
     'Format your response as follows: "The correct answer is (insert answer here)".'
 )
 _LB_ANS_RE_PAREN = re.compile(r"The correct answer is \(([A-D])\)")
 _LB_ANS_RE_BARE = re.compile(r"The correct answer is ([A-D])")
 
-# Closed-book forced-choice rider. Without the document, the eval model tends to
-# hedge ("I can't answer without the text"), which the extraction regex scores
-# as a miss — dragging the control *below* the 25% random-chance floor for a
-# 4-way MC and thereby inflating the apparent context lift. Requiring a single
-# best-guess letter makes the control measure the model's actual prior instead
-# of its willingness to abstain, so the lift over it is honest.
-_LB_FORCE_CHOICE = (
-    "\n\nYou do not have the source text, but you must still answer. Pick the "
-    "single most likely option from your own knowledge and best guess — never "
-    "reply that you cannot answer or need the document. Respond with exactly "
-    'one letter in the required format: "The correct answer is (X)".'
-)
 
-
-def _build_lb_prompt(item: dict, context: str, *, closed_book: bool = False) -> str:
+def _build_lb_prompt(item: dict, context: str) -> str:
     """Render the LongBench MC prompt for an item against a context string.
 
-    In the closed-book control the ``$DOC$`` slot is a placeholder, so we append
-    a forced-choice rider (see ``_LB_FORCE_CHOICE``) that stops the model from
-    hedging its way below the random-chance floor.
+    The same template is used for every leg (open- and closed-book): the only
+    thing that varies is ``context`` (the ``$DOC$`` slot), so any accuracy gap
+    is attributable to the document, not to a prompt difference.
     """
-    prompt = (
+    return (
         _LB_PROMPT_TEMPLATE
         .replace("$DOC$", context)
         .replace("$Q$", item.get("question", ""))
@@ -1021,9 +1021,6 @@ def _build_lb_prompt(item: dict, context: str, *, closed_book: bool = False) -> 
         .replace("$C_C$", item.get("choice_C", ""))
         .replace("$C_D$", item.get("choice_D", ""))
     )
-    if closed_book:
-        prompt += _LB_FORCE_CHOICE
-    return prompt
 
 
 def _extract_lb_answer(response: str) -> str | None:
@@ -1178,7 +1175,7 @@ def call_eval_llm(
     Returns (predicted_letter | None, input_tokens).
     """
     context = _build_eval_context(compressed_messages, closed_book=closed_book)
-    prompt = _build_lb_prompt(item, context, closed_book=closed_book)
+    prompt = _build_lb_prompt(item, context)
 
     provider = eval_cfg.get("provider", "anthropic")
     model = eval_cfg.get("model", "claude-sonnet-4-6")
