@@ -991,6 +991,40 @@ _LB_PROMPT_TEMPLATE = (
 _LB_ANS_RE_PAREN = re.compile(r"The correct answer is \(([A-D])\)")
 _LB_ANS_RE_BARE = re.compile(r"The correct answer is ([A-D])")
 
+# Closed-book forced-choice rider. Without the document, the eval model tends to
+# hedge ("I can't answer without the text"), which the extraction regex scores
+# as a miss — dragging the control *below* the 25% random-chance floor for a
+# 4-way MC and thereby inflating the apparent context lift. Requiring a single
+# best-guess letter makes the control measure the model's actual prior instead
+# of its willingness to abstain, so the lift over it is honest.
+_LB_FORCE_CHOICE = (
+    "\n\nYou do not have the source text, but you must still answer. Pick the "
+    "single most likely option from your own knowledge and best guess — never "
+    "reply that you cannot answer or need the document. Respond with exactly "
+    'one letter in the required format: "The correct answer is (X)".'
+)
+
+
+def _build_lb_prompt(item: dict, context: str, *, closed_book: bool = False) -> str:
+    """Render the LongBench MC prompt for an item against a context string.
+
+    In the closed-book control the ``$DOC$`` slot is a placeholder, so we append
+    a forced-choice rider (see ``_LB_FORCE_CHOICE``) that stops the model from
+    hedging its way below the random-chance floor.
+    """
+    prompt = (
+        _LB_PROMPT_TEMPLATE
+        .replace("$DOC$", context)
+        .replace("$Q$", item.get("question", ""))
+        .replace("$C_A$", item.get("choice_A", ""))
+        .replace("$C_B$", item.get("choice_B", ""))
+        .replace("$C_C$", item.get("choice_C", ""))
+        .replace("$C_D$", item.get("choice_D", ""))
+    )
+    if closed_book:
+        prompt += _LB_FORCE_CHOICE
+    return prompt
+
 
 def _extract_lb_answer(response: str) -> str | None:
     m = _LB_ANS_RE_PAREN.search(response.replace("*", ""))
@@ -1144,16 +1178,7 @@ def call_eval_llm(
     Returns (predicted_letter | None, input_tokens).
     """
     context = _build_eval_context(compressed_messages, closed_book=closed_book)
-
-    prompt = (
-        _LB_PROMPT_TEMPLATE
-        .replace("$DOC$", context)
-        .replace("$Q$", item.get("question", ""))
-        .replace("$C_A$", item.get("choice_A", ""))
-        .replace("$C_B$", item.get("choice_B", ""))
-        .replace("$C_C$", item.get("choice_C", ""))
-        .replace("$C_D$", item.get("choice_D", ""))
-    )
+    prompt = _build_lb_prompt(item, context, closed_book=closed_book)
 
     provider = eval_cfg.get("provider", "anthropic")
     model = eval_cfg.get("model", "claude-sonnet-4-6")

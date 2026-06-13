@@ -16,6 +16,7 @@ import benchmarks.clawrouter.bench_phase1 as harness
 from benchmarks.clawrouter.bench_phase1 import (
     GateResult,
     _build_eval_context,
+    _build_lb_prompt,
     _extract_lb_answer,
     _load_lb_items,
     _percentile,
@@ -190,6 +191,35 @@ def test_build_eval_context_closed_book_is_placeholder():
     msgs = [{"role": "user", "content": "should not appear"}]
     assert _build_eval_context(msgs, closed_book=True) == "[no document provided]"
     assert "should not appear" not in _build_eval_context(msgs, closed_book=True)
+
+
+# ── _build_lb_prompt: closed-book forced choice ─────────────────────────────
+
+
+_LB_ITEM = {
+    "question": "Q?",
+    "choice_A": "a",
+    "choice_B": "b",
+    "choice_C": "c",
+    "choice_D": "d",
+}
+
+
+@pytest.mark.unit
+def test_build_lb_prompt_open_book_has_no_forced_choice():
+    prompt = _build_lb_prompt(_LB_ITEM, "the document", closed_book=False)
+    assert "the document" in prompt
+    assert "must still answer" not in prompt  # no forced-choice rider open-book
+
+
+@pytest.mark.unit
+def test_build_lb_prompt_closed_book_forces_a_letter():
+    prompt = _build_lb_prompt(_LB_ITEM, "[no document provided]", closed_book=True)
+    # The rider must tell the model to guess rather than abstain, so a hedge
+    # does not get scored below the 25% random floor (inflating context lift).
+    assert "must still answer" in prompt
+    assert "never" in prompt and "cannot answer" in prompt
+    assert prompt.rstrip().endswith('"The correct answer is (X)".')
 
 
 # ── call_eval_llm: low eval temperature ─────────────────────────────────────
