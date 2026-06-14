@@ -219,7 +219,12 @@ def compute_metrics(
     compress_ms_b = [
         r["compress_ms"] for r in records_b if r.get("compress_ms") is not None
     ]
-    eval_ms_b = [r["eval_ms"] for r in records_b if r.get("eval_ms") is not None]
+    # Eval-LLM latency is sourced from Leg A, not Leg B: under the shared eval
+    # draw, verbatim Leg-B items reuse Leg A's answer and record eval_ms=0, so a
+    # Leg-B P50 would read ~0ms and misrepresent the judge as "free". Leg A
+    # always issues a real judge call (no prior to reuse), so its distribution is
+    # the honest per-call cost.
+    eval_ms_a = [r["eval_ms"] for r in records_a if r.get("eval_ms") is not None]
 
     return {
         "delta_tokens": delta_tokens,
@@ -229,8 +234,8 @@ def compute_metrics(
         "cost_saved_per_1k": cost_saved_per_1k,
         "sidecar_p50_ms": _percentile(compress_ms_b, 0.50),
         "sidecar_p95_ms": _percentile(compress_ms_b, 0.95),
-        "eval_p50_ms": _percentile(eval_ms_b, 0.50),
-        "eval_p95_ms": _percentile(eval_ms_b, 0.95),
+        "eval_p50_ms": _percentile(eval_ms_a, 0.50),
+        "eval_p95_ms": _percentile(eval_ms_a, 0.95),
         "tokens_a": tokens_a,
         "tokens_b": tokens_b,
         "acc_a": acc_a,
@@ -528,6 +533,99 @@ def acc_by_route(
     return rows
 
 
+def assert_route_reuse_invariant(records_b: list[dict[str, Any]]) -> None:
+    """Make the ``verbatim`` row's *Δ = 0* mechanical, not coincidental.
+
+    ``acc_by_route`` pins the verbatim row to Δ = 0 *only if* every
+    verbatim-labelled item actually reused Leg A's eval draw — byte-identical
+    prompt ⇒ same answer object ⇒ same accuracy. But the route label and the
+    reuse decision are produced by two **independent** paths: the label comes
+    from leanctx's ``classify()`` + threshold replay (``_verbatim_split_item``),
+    while reuse fires on a byte-identical ``_build_eval_context`` (``:1284``).
+    Nothing else cross-checks them, so the headline guarantee is otherwise just
+    prose, contingent on the classifier replay always matching the sidecar.
+
+    This consumes the ``eval_reused`` flag and asserts the two paths agree:
+    every ``verbatim`` item was reused (Δ pinned to 0) and no ``lingua`` /
+    ``hybrid`` item was (a compressed item must be scored on its own draw, not
+    silently inherit Leg A's). It also catches the truncation false-hit the
+    review flagged — a genuinely-compressed item whose change lands in the
+    dropped middle would reuse on a ``lingua`` label and trip the second clause.
+
+    Only Leg B records carry a route; items without a route or without an eval
+    (``eval_reused`` unset) are outside ``acc_by_route``'s set and are skipped.
+    Raises ``AssertionError`` on any divergence.
+    """
+    violations: list[str] = []
+    for r in records_b:
+        route = r.get("lx_route")
+        if not route or r.get("eval_reused") is None:
+            continue
+        reused = bool(r["eval_reused"])
+        item_id = r.get("item_id")
+        if route == "verbatim" and not reused:
+            violations.append(
+                f"  {item_id}: route=verbatim but eval_reused=False "
+                "→ Δ not pinned to 0 (verbatim row would carry decoder noise)"
+            )
+        elif route in ("lingua", "hybrid") and reused:
+            violations.append(
+                f"  {item_id}: route={route} but eval_reused=True "
+                "→ compressed item silently scored as a no-op (false cache hit)"
+            )
+    if violations:
+        raise AssertionError(
+            "route/reuse invariant violated — 'verbatim Δ=0' is not mechanical:\n"
+            + "\n".join(violations)
+        )
+
+
+def assert_overall_parity(
+    records_a: list[dict[str, Any]],
+    records_b: list[dict[str, Any]],
+) -> None:
+    """Keep the two ``overall`` accuracy figures from silently diverging.
+
+    Section 3's headline pools *every* scored item (accuracy not ``None``);
+    ``acc_by_route``'s ``overall`` row pools only items that *also* carry a
+    route, joined Leg A↔B by ``item_id``. On the current single-message LB
+    workload these are the same set, so the two figures agree — but nothing
+    structurally guarantees it. This asserts the sets coincide: Leg A and Leg B
+    score the same item_ids, and every scored Leg B item carries a route. If
+    they ever drift (e.g. a scored item without a route label), the headline and
+    the by-route ``overall`` would quietly disagree; this fails loudly instead.
+
+    Skipped entirely when no item carries a route (no by-route table to desync).
+    Raises ``AssertionError`` on divergence.
+    """
+    a_ids = {r.get("item_id") for r in records_a if r.get("accuracy") is not None}
+    b_ids = {r.get("item_id") for r in records_b if r.get("accuracy") is not None}
+    routed = {
+        r.get("item_id")
+        for r in records_b
+        if r.get("accuracy") is not None and r.get("lx_route")
+    }
+    if not routed:
+        return  # no by-route 'overall' row exists, nothing to reconcile
+
+    problems: list[str] = []
+    if a_ids != b_ids:
+        problems.append(
+            f"  Leg A/B scored sets differ: A-only={sorted(a_ids - b_ids)}, "
+            f"B-only={sorted(b_ids - a_ids)}"
+        )
+    if b_ids != routed:
+        problems.append(
+            f"  scored Leg B items missing a route: {sorted(b_ids - routed)}"
+        )
+    if problems:
+        raise AssertionError(
+            "headline vs by-route 'overall' set parity violated — the two "
+            "'overall' accuracies are computed from different sets:\n"
+            + "\n".join(problems)
+        )
+
+
 def format_report(
     metrics: dict[str, Any],
     gate: GateResult,
@@ -776,6 +874,14 @@ def format_report(
                   "the compressed context may not be carrying the answer. Treat the "
                   "accuracy result with caution.")
             A("")
+        # Enforce that the verbatim row below is Δ=0 *by mechanism*: every
+        # verbatim item reused Leg A's draw, no lingua/hybrid item did. Raises
+        # if the classify-replay route and the byte-identical-context reuse
+        # decision ever disagree.
+        assert_route_reuse_invariant(lb_b)
+        # And that the by-route 'overall' row pools the same items as the
+        # Section-3 headline accuracy, so the two figures can't desync.
+        assert_overall_parity(lb_a, lb_b)
         route_rows = acc_by_route(lb_a, lb_b)
         if route_rows:
             A("### By leanctx route")
@@ -823,7 +929,10 @@ def format_report(
     A("## 5. Latency")
     A("")
     A("_Sidecar = the Layer 8 compression call in isolation (Leg B). Eval LLM "
-      "time is shown separately and is **not** part of the sidecar figure._")
+      "time is the LongBench judge call, sourced from **Leg A** (every item gets "
+      "a real call there; Leg B reuses identical-input draws at 0ms under the "
+      "shared draw, which would otherwise read as a free judge). It is shown "
+      "separately and is **not** part of the sidecar figure._")
     A("")
     A("| Metric | P50 | P95 |")
     A("|--------|-----|-----|")
@@ -1493,8 +1602,19 @@ def main(argv: list[str] | None = None) -> int:
         sidecar_proc.terminate()
         sidecar_proc.wait()
 
-    all_a = [r for r in records_a if r["tokens_compressed"] > 0]
-    all_b = [r for r in records_b if r["tokens_compressed"] > 0]
+    # agent_s1 is a synthetic 79-token stub that exercises the agent code path
+    # only; keep it in the JSONL for debugging but exclude it from the metric
+    # pools so it never lands in the savings-gate denominator or accuracy split.
+    # (The per-workload table that used to surface it was already dropped.)
+    _METRIC_EXCLUDE = {"agent_s1"}
+    all_a = [
+        r for r in records_a
+        if r["tokens_compressed"] > 0 and r.get("workload") not in _METRIC_EXCLUDE
+    ]
+    all_b = [
+        r for r in records_b
+        if r["tokens_compressed"] > 0 and r.get("workload") not in _METRIC_EXCLUDE
+    ]
 
     import datetime as _dt
     run_date = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")

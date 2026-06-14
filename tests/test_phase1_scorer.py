@@ -11,6 +11,8 @@ from benchmarks.clawrouter.bench_phase1 import (
     GateResult,
     acc_by_route,
     apply_gate,
+    assert_overall_parity,
+    assert_route_reuse_invariant,
     compute_metrics,
     format_report,
 )
@@ -181,3 +183,121 @@ def test_format_report_includes_route_accuracy_section():
     assert "By leanctx route" in report
     assert "verbatim" in report
     assert "lingua" in report
+
+
+# ── route/reuse invariant tests ─────────────────────────────────────────────
+#
+# These lock the *linkage* between the route label and the reuse decision that
+# makes the verbatim row's Δ=0 mechanical (not coincidental). acc_by_route's own
+# tests above only check the math given a route; here we enforce that a verbatim
+# label can only ever come from a reused (Δ=0) draw.
+
+
+def _reuse_records():
+    """Consistent Leg B: verbatim items reused Leg A's draw, lingua items did not."""
+    meta = {"workload": "lb_s1", "tokens_raw": 100, "tokens_compressed": 100,
+            "lb_difficulty": "hard", "lb_length": "long", "lb_domain": "x"}
+    return [
+        {"item_id": "v1", "accuracy": True, "lx_route": "verbatim", "eval_reused": True, **meta},
+        {"item_id": "v2", "accuracy": False, "lx_route": "verbatim", "eval_reused": True, **meta},
+        {"item_id": "l1", "accuracy": False, "lx_route": "lingua", "eval_reused": False, **meta},
+        {"item_id": "l2", "accuracy": True, "lx_route": "lingua", "eval_reused": False, **meta},
+    ]
+
+
+@pytest.mark.unit
+def test_route_reuse_invariant_holds_when_verbatim_reused():
+    # verbatim ⇒ reused ⇒ Δ=0: no raise, and the verbatim row is genuinely 0.
+    records_b = _reuse_records()
+    assert_route_reuse_invariant(records_b)  # does not raise
+
+    records_a = [{"item_id": r["item_id"], "accuracy": r["accuracy"]} for r in records_b]
+    rows = {label: (n, a, b) for label, n, a, b in acc_by_route(records_a, records_b)}
+    assert rows["verbatim"][2] - rows["verbatim"][1] == 0.0  # Δ pinned to 0
+
+
+@pytest.mark.unit
+def test_route_reuse_invariant_raises_on_verbatim_not_reused():
+    records_b = _reuse_records()
+    records_b[0]["eval_reused"] = False  # verbatim item scored on its own draw
+    with pytest.raises(AssertionError, match="route=verbatim but eval_reused=False"):
+        assert_route_reuse_invariant(records_b)
+
+
+@pytest.mark.unit
+def test_route_reuse_invariant_raises_on_lingua_false_cache_hit():
+    records_b = _reuse_records()
+    records_b[2]["eval_reused"] = True  # compressed item silently inherited Leg A
+    with pytest.raises(AssertionError, match="route=lingua but eval_reused=True"):
+        assert_route_reuse_invariant(records_b)
+
+
+@pytest.mark.unit
+def test_route_reuse_invariant_skips_unevaluated_and_unrouted_items():
+    # Items without a route, or routed but never eval'd (eval_reused unset), are
+    # outside acc_by_route's set and must not trip the invariant.
+    records_b = [
+        {"item_id": "a", "accuracy": True},  # no route
+        {"item_id": "b", "lx_route": "verbatim"},  # routed but no eval_reused
+    ]
+    assert_route_reuse_invariant(records_b)  # does not raise
+
+
+@pytest.mark.unit
+def test_overall_parity_holds_on_aligned_sets():
+    records_b = _reuse_records()
+    records_a = [
+        {k: v for k, v in r.items() if k not in ("lx_route", "eval_reused")}
+        for r in records_b
+    ]
+    assert_overall_parity(records_a, records_b)  # does not raise
+
+
+@pytest.mark.unit
+def test_overall_parity_raises_when_scored_item_lacks_route():
+    records_b = _reuse_records()
+    del records_b[3]["lx_route"]  # scored item with no route → headline ⊋ by-route
+    records_a = [
+        {k: v for k, v in r.items() if k not in ("lx_route", "eval_reused")}
+        for r in records_b
+    ]
+    with pytest.raises(AssertionError, match="missing a route"):
+        assert_overall_parity(records_a, records_b)
+
+
+@pytest.mark.unit
+def test_overall_parity_raises_when_legs_score_different_items():
+    records_b = _reuse_records()
+    records_a = [
+        {k: v for k, v in r.items() if k not in ("lx_route", "eval_reused")}
+        for r in records_b
+    ]
+    records_a[0]["item_id"] = "ghost"  # Leg A scored an item Leg B did not
+    with pytest.raises(AssertionError, match="scored sets differ"):
+        assert_overall_parity(records_a, records_b)
+
+
+@pytest.mark.unit
+def test_overall_parity_skipped_without_routes():
+    # No route anywhere ⇒ no by-route 'overall' row ⇒ nothing to reconcile.
+    assert_overall_parity(
+        [{"item_id": "a", "accuracy": True}],
+        [{"item_id": "a", "accuracy": True}],
+    )  # does not raise
+
+
+@pytest.mark.unit
+def test_format_report_enforces_route_reuse_invariant():
+    # The report path itself refuses to render a verbatim row not backed by reuse.
+    records_b = _reuse_records()
+    records_b[0]["eval_reused"] = False
+    records_a = [
+        {k: v for k, v in r.items() if k not in ("lx_route", "eval_reused")}
+        for r in records_b
+    ]
+    metrics = compute_metrics(records_a, records_b)
+    with pytest.raises(AssertionError, match="not mechanical"):
+        format_report(
+            metrics, GateResult(passed=True),
+            records_a=records_a, records_b=records_b,
+        )

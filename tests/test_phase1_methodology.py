@@ -51,6 +51,28 @@ def test_extract_lb_answer(text, expected):
     assert _extract_lb_answer(text) == expected
 
 
+@pytest.mark.unit
+def test_closed_book_prompt_forces_a_parseable_letter():
+    """The forced-choice instruction lives in the shared template, and a
+    response in the exact format it dictates parses to a single letter — even
+    in the closed-book leg where there is no document. Locks the
+    template↔parser contract that keeps the control off the 0% abstain floor.
+
+    (The e2e counterpart, ``test_e2e_closed_book_responses_parse_to_letter``,
+    asserts a *real* closed-book judge call lands a letter.)
+    """
+    item = {
+        "question": "Q?", "choice_A": "a", "choice_B": "b",
+        "choice_C": "c", "choice_D": "d",
+    }
+    prompt = _build_lb_prompt(item, "[no document provided]")
+    # The forced-choice instruction must be present in the prompt both legs see.
+    assert "commit to exactly one option" in prompt
+    assert "never reply that you cannot answer" in prompt
+    # A response in the dictated format parses to exactly one A–D letter.
+    assert _extract_lb_answer("The correct answer is (C).") == "C"
+
+
 # ── _sum_tokens ─────────────────────────────────────────────────────────────
 
 
@@ -393,11 +415,16 @@ def test_percentile_median_and_p95():
 
 @pytest.mark.unit
 def test_compute_metrics_sidecar_latency_from_compress_ms():
-    """Sidecar latency must come from compress_ms, NOT end-to-end duration_ms."""
-    records_a = [{"tokens_raw": 100, "tokens_compressed": 80, "accuracy": True}]
+    """Sidecar latency comes from Leg B compress_ms (NOT end-to-end duration_ms);
+    eval-LLM latency comes from Leg A (Leg B reuses identical-input draws at
+    eval_ms=0 under the shared draw, which would read as a ~0ms 'free' judge)."""
+    records_a = [
+        {"tokens_raw": 100, "tokens_compressed": 80, "accuracy": True, "eval_ms": 9000},
+        {"tokens_raw": 100, "tokens_compressed": 80, "accuracy": True, "eval_ms": 12000},
+    ]
     records_b = [
         {"tokens_raw": 100, "tokens_compressed": 50, "accuracy": True,
-         "compress_ms": 300, "eval_ms": 9000, "duration_ms": 9300},
+         "compress_ms": 300, "eval_ms": 0, "duration_ms": 9300},     # reused → 0ms
         {"tokens_raw": 100, "tokens_compressed": 50, "accuracy": True,
          "compress_ms": 400, "eval_ms": 12000, "duration_ms": 12400},
     ]
@@ -405,6 +432,7 @@ def test_compute_metrics_sidecar_latency_from_compress_ms():
     # p50 is in the 300–400 ms range, nowhere near the 9–12 s end-to-end times
     assert metrics["sidecar_p50_ms"] in (300, 400)
     assert metrics["sidecar_p50_ms"] < 1000
+    # eval p50 reflects the real Leg A judge cost (9–12 s), not Leg B's 0ms reuse
     assert metrics["eval_p50_ms"] >= 9000
 
 

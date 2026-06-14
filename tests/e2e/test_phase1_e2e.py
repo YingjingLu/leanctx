@@ -160,6 +160,40 @@ def test_e2e_route_accuracy_section_and_shared_eval_draw(tmp_path):
 
 
 @pytest.mark.e2e
+def test_e2e_closed_book_responses_parse_to_letter(tmp_path):
+    """The forced-choice instruction does its job on real judge calls: every
+    closed-book (Leg C) response — no document at all — still parses to a single
+    A–D letter rather than an abstention. This is what keeps the control off the
+    0% floor and makes the context-lift number honest."""
+    import json
+
+    from benchmarks.clawrouter.bench_phase1 import main
+
+    out_path = tmp_path / "cb.jsonl"
+    report_path = tmp_path / "cb_report.md"
+
+    main([
+        "--skip-setup",
+        "--workdir", "/tmp/clawrouter_intg_test",
+        "--lb-stages", "1",
+        "--lb-n", "3",
+        "--agent-stages", "1",
+        "--closed-book",           # run the control leg
+        "--shim-port", "8479",
+        "--out", str(out_path),
+        "--report", str(report_path),
+    ])
+
+    rows = [json.loads(line) for line in out_path.read_text().splitlines()]
+    leg_c = [r for r in rows if r.get("leg") == "C" and r.get("item_id")]
+    assert leg_c, "no closed-book (Leg C) records found"
+    for r in leg_c:
+        assert r.get("closed_book") is True, "Leg C record not flagged closed_book"
+        assert r.get("lb_pred") in ("A", "B", "C", "D"), \
+            f"closed-book response did not parse to a letter: lb_pred={r.get('lb_pred')!r}"
+
+
+@pytest.mark.e2e
 def test_e2e_verbatim_split_section_and_jsonl(tmp_path):
     """Phase B: main() emits the verbatim-excluded section and per-item lx_*
     fields in the JSONL, and the decomposition identity holds on real data."""
