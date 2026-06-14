@@ -626,6 +626,56 @@ def assert_overall_parity(
         )
 
 
+def validate_run_invariants(
+    records_a: list[dict[str, Any]],
+    records_b: list[dict[str, Any]],
+) -> None:
+    """Methodology self-checks for a finished run. Raises ``AssertionError`` on
+    violation.
+
+    These used to live inside ``format_report``, but ``main`` renders the report
+    *before* it persists the JSONL/report/dumps — so a raise there discarded a
+    completed, fully-paid-for run with nothing written. ``main`` now calls this
+    only *after* every artifact is on disk, so a violation is surfaced loudly
+    (non-zero exit) without destroying the run's output. ``format_report`` is
+    kept a pure formatter.
+
+    Operates on the same scored (accuracy-bearing) Leg-A/Leg-B subsets the report
+    pools, so it validates exactly what the report shows.
+    """
+    lb_a = [r for r in records_a if r.get("accuracy") is not None]
+    lb_b = [r for r in records_b if r.get("accuracy") is not None]
+    assert_route_reuse_invariant(lb_b)
+    assert_overall_parity(lb_a, lb_b)
+
+
+def align_metric_pools(
+    records_a: list[dict[str, Any]],
+    records_b: list[dict[str, Any]],
+    *,
+    exclude_workloads: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``(all_a, all_b)`` filtered to the *shared* metric pool.
+
+    An item is kept only if **both** legs produced it with ``tokens_compressed >
+    0`` and its workload is not excluded. Filtering each leg independently could
+    drop an item from one leg only — e.g. a leg compresses it to 0 tokens, or the
+    sidecar fail-opens — which would (a) make ``compute_metrics``' ``delta_tokens``
+    compare mismatched populations (skewing the savings gate) and (b) trip the
+    headline-vs-by-route parity check. After ``exclude_workloads`` the survivors
+    are LongBench items, which always carry an ``item_id``.
+    """
+    def _in_pool(r: dict[str, Any]) -> bool:
+        return r["tokens_compressed"] > 0 and r.get("workload") not in exclude_workloads
+
+    a_pool_ids = {r.get("item_id") for r in records_a if _in_pool(r)}
+    b_pool_ids = {r.get("item_id") for r in records_b if _in_pool(r)}
+    shared_ids = a_pool_ids & b_pool_ids
+    all_a = [r for r in records_a if _in_pool(r) and r.get("item_id") in shared_ids]
+    all_b = [r for r in records_b if _in_pool(r) and r.get("item_id") in shared_ids]
+    return all_a, all_b
+
+
 def format_report(
     metrics: dict[str, Any],
     gate: GateResult,
@@ -874,14 +924,11 @@ def format_report(
                   "the compressed context may not be carrying the answer. Treat the "
                   "accuracy result with caution.")
             A("")
-        # Enforce that the verbatim row below is Δ=0 *by mechanism*: every
-        # verbatim item reused Leg A's draw, no lingua/hybrid item did. Raises
-        # if the classify-replay route and the byte-identical-context reuse
-        # decision ever disagree.
-        assert_route_reuse_invariant(lb_b)
-        # And that the by-route 'overall' row pools the same items as the
-        # Section-3 headline accuracy, so the two figures can't desync.
-        assert_overall_parity(lb_a, lb_b)
+        # The verbatim-row Δ=0 mechanism (assert_route_reuse_invariant) and the
+        # headline/by-route 'overall' parity (assert_overall_parity) are checked
+        # by validate_run_invariants() in main() *after* all artifacts are
+        # written — so a methodology violation surfaces loudly without discarding
+        # a completed, fully-paid-for run. The renderer itself stays pure.
         route_rows = acc_by_route(lb_a, lb_b)
         if route_rows:
             A("### By leanctx route")
@@ -1607,14 +1654,9 @@ def main(argv: list[str] | None = None) -> int:
     # pools so it never lands in the savings-gate denominator or accuracy split.
     # (The per-workload table that used to surface it was already dropped.)
     _METRIC_EXCLUDE = {"agent_s1"}
-    all_a = [
-        r for r in records_a
-        if r["tokens_compressed"] > 0 and r.get("workload") not in _METRIC_EXCLUDE
-    ]
-    all_b = [
-        r for r in records_b
-        if r["tokens_compressed"] > 0 and r.get("workload") not in _METRIC_EXCLUDE
-    ]
+    all_a, all_b = align_metric_pools(
+        records_a, records_b, exclude_workloads=_METRIC_EXCLUDE
+    )
 
     import datetime as _dt
     run_date = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1666,6 +1708,19 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n[out] JSONL → {args.out}")
     print(f"[out] report → {args.report}")
     print(f"[out] per-item dumps → {by_item_dir} ({len(item_files)} items)")
+
+    # Methodology self-checks run LAST, after every artifact is on disk, so a
+    # violation is surfaced loudly (exit 3) without discarding the run's output.
+    try:
+        validate_run_invariants(all_a, all_b)
+    except AssertionError as exc:
+        print(
+            "\n[INVALID] methodology self-check failed — the run's metrics are "
+            "untrustworthy, but all artifacts above were still written:\n"
+            f"{exc}",
+            flush=True,
+        )
+        return 3
 
     return 0 if gate.passed else 1
 

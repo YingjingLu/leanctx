@@ -10,11 +10,13 @@ import pytest
 from benchmarks.clawrouter.bench_phase1 import (
     GateResult,
     acc_by_route,
+    align_metric_pools,
     apply_gate,
     assert_overall_parity,
     assert_route_reuse_invariant,
     compute_metrics,
     format_report,
+    validate_run_invariants,
 )
 
 # ── Shared fixtures ────────────────────────────────────────────────────────
@@ -287,17 +289,78 @@ def test_overall_parity_skipped_without_routes():
 
 
 @pytest.mark.unit
-def test_format_report_enforces_route_reuse_invariant():
-    # The report path itself refuses to render a verbatim row not backed by reuse.
+def test_validate_run_invariants_enforces_route_reuse_invariant():
+    # The methodology self-check (run by main() AFTER artifacts are written)
+    # refuses a verbatim row not backed by reuse.
     records_b = _reuse_records()
     records_b[0]["eval_reused"] = False
     records_a = [
         {k: v for k, v in r.items() if k not in ("lx_route", "eval_reused")}
         for r in records_b
     ]
-    metrics = compute_metrics(records_a, records_b)
     with pytest.raises(AssertionError, match="not mechanical"):
-        format_report(
-            metrics, GateResult(passed=True),
-            records_a=records_a, records_b=records_b,
-        )
+        validate_run_invariants(records_a, records_b)
+
+
+@pytest.mark.unit
+def test_format_report_is_pure_and_does_not_raise_on_invariant_violation():
+    # The renderer must stay a pure formatter: a violation that would trip
+    # validate_run_invariants must NOT prevent the report from rendering (so a
+    # completed run is never discarded by the report path). The check is enforced
+    # separately by validate_run_invariants in main().
+    records_b = _reuse_records()
+    records_b[0]["eval_reused"] = False  # would trip validate_run_invariants
+    records_a = [
+        {k: v for k, v in r.items() if k not in ("lx_route", "eval_reused")}
+        for r in records_b
+    ]
+    metrics = compute_metrics(records_a, records_b)
+    report = format_report(
+        metrics, GateResult(passed=True),
+        records_a=records_a, records_b=records_b,
+    )
+    assert "By leanctx route" in report  # rendered despite the violation
+
+
+# ── align_metric_pools tests ────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_align_metric_pools_keeps_shared_eligible_items():
+    records_a = [
+        {"item_id": "v1", "workload": "lb_s1", "tokens_compressed": 80},
+        {"item_id": "v2", "workload": "lb_s1", "tokens_compressed": 90},
+        {"item_id": "agent", "workload": "agent_s1", "tokens_compressed": 79},
+    ]
+    records_b = [
+        {"item_id": "v1", "workload": "lb_s1", "tokens_compressed": 50},
+        {"item_id": "v2", "workload": "lb_s1", "tokens_compressed": 40},
+        {"item_id": "agent", "workload": "agent_s1", "tokens_compressed": 79},
+    ]
+    all_a, all_b = align_metric_pools(
+        records_a, records_b, exclude_workloads={"agent_s1"}
+    )
+    assert [r["item_id"] for r in all_a] == ["v1", "v2"]  # agent_s1 excluded
+    assert [r["item_id"] for r in all_b] == ["v1", "v2"]
+
+
+@pytest.mark.unit
+def test_align_metric_pools_drops_item_compressed_to_zero_in_one_leg():
+    # An item Leg B compressed to 0 tokens must be dropped from BOTH pools, so
+    # compute_metrics never compares mismatched populations (skewing delta_tokens)
+    # and the headline-vs-by-route parity check can't trip.
+    records_a = [
+        {"item_id": "v1", "workload": "lb_s1", "tokens_compressed": 80},
+        {"item_id": "v2", "workload": "lb_s1", "tokens_compressed": 90},
+    ]
+    records_b = [
+        {"item_id": "v1", "workload": "lb_s1", "tokens_compressed": 50},
+        {"item_id": "v2", "workload": "lb_s1", "tokens_compressed": 0},  # degenerate
+    ]
+    all_a, all_b = align_metric_pools(
+        records_a, records_b, exclude_workloads={"agent_s1"}
+    )
+    assert [r["item_id"] for r in all_a] == ["v1"]
+    assert [r["item_id"] for r in all_b] == ["v1"]
+    # The two pools are the same item set — delta_tokens compares like with like.
+    assert {r["item_id"] for r in all_a} == {r["item_id"] for r in all_b}
