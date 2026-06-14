@@ -7,17 +7,23 @@ All marked unit — no real network, no real model, no real dataset.
 """
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 import benchmarks.clawrouter.bench_phase1 as harness
 from benchmarks.clawrouter.bench_phase1 import (
     GateResult,
+    _build_eval_context,
+    _build_lb_prompt,
     _extract_lb_answer,
     _load_lb_items,
     _percentile,
     _sum_tokens,
     _verbatim_split_item,
     aggregate_verbatim_metrics,
+    call_eval_llm,
     compute_metrics,
     format_report,
     run_leg,
@@ -43,6 +49,28 @@ from benchmarks.clawrouter.bench_phase1 import (
 )
 def test_extract_lb_answer(text, expected):
     assert _extract_lb_answer(text) == expected
+
+
+@pytest.mark.unit
+def test_closed_book_prompt_forces_a_parseable_letter():
+    """The forced-choice instruction lives in the shared template, and a
+    response in the exact format it dictates parses to a single letter — even
+    in the closed-book leg where there is no document. Locks the
+    template↔parser contract that keeps the control off the 0% abstain floor.
+
+    (The e2e counterpart, ``test_e2e_closed_book_responses_parse_to_letter``,
+    asserts a *real* closed-book judge call lands a letter.)
+    """
+    item = {
+        "question": "Q?", "choice_A": "a", "choice_B": "b",
+        "choice_C": "c", "choice_D": "d",
+    }
+    prompt = _build_lb_prompt(item, "[no document provided]")
+    # The forced-choice instruction must be present in the prompt both legs see.
+    assert "commit to exactly one option" in prompt
+    assert "never reply that you cannot answer" in prompt
+    # A response in the dictated format parses to exactly one A–D letter.
+    assert _extract_lb_answer("The correct answer is (C).") == "C"
 
 
 # ── _sum_tokens ─────────────────────────────────────────────────────────────
@@ -163,6 +191,205 @@ def test_run_leg_closed_book_skips_shim(monkeypatch, lb_item):
     assert rec["compress_ms"] == 0
 
 
+# ── _build_eval_context ─────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_build_eval_context_joins_text_roles():
+    msgs = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "world"},
+        {"role": "tool", "content": "ignored-role"},
+        {"role": "user", "content": [{"type": "text", "text": "blocks-ignored"}]},
+    ]
+    ctx = _build_eval_context(msgs)
+    assert "hello" in ctx and "world" in ctx
+    assert "ignored-role" not in ctx  # role not in {user,system,assistant}
+    assert "blocks-ignored" not in ctx  # non-string content skipped
+
+
+@pytest.mark.unit
+def test_build_eval_context_closed_book_is_placeholder():
+    msgs = [{"role": "user", "content": "should not appear"}]
+    assert _build_eval_context(msgs, closed_book=True) == "[no document provided]"
+    assert "should not appear" not in _build_eval_context(msgs, closed_book=True)
+
+
+# ── _build_lb_prompt: closed-book forced choice ─────────────────────────────
+
+
+_LB_ITEM = {
+    "question": "Q?",
+    "choice_A": "a",
+    "choice_B": "b",
+    "choice_C": "c",
+    "choice_D": "d",
+}
+
+
+@pytest.mark.unit
+def test_build_lb_prompt_forces_a_letter_in_both_legs():
+    # The forced-choice instruction lives in the shared template, so a hedge is
+    # never scored below the 25% random floor (which would inflate context lift)
+    # regardless of leg — and the prompt is byte-identical apart from $DOC$.
+    open_book = _build_lb_prompt(_LB_ITEM, "the document")
+    closed_book = _build_lb_prompt(_LB_ITEM, "[no document provided]")
+    for prompt in (open_book, closed_book):
+        assert "must commit to exactly one option" in prompt
+        assert "never reply that you cannot answer" in prompt
+    # Identical scaffolding: the only difference is the $DOC$ slot.
+    assert open_book.replace("the document", "[no document provided]") == closed_book
+
+
+# ── call_eval_llm: low eval temperature ─────────────────────────────────────
+
+
+def _fake_anthropic(captured: dict, *, text: str = "The correct answer is (B)"):
+    """A stand-in ``anthropic`` module whose client records create() kwargs."""
+    class _Resp:
+        content = [types.SimpleNamespace(text=text)]
+        usage = types.SimpleNamespace(input_tokens=42)
+
+    class _Messages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _Resp()
+
+    class _Client:
+        def __init__(self):
+            self.messages = _Messages()
+
+    mod = types.ModuleType("anthropic")
+    mod.Anthropic = _Client
+    return mod
+
+
+def _fake_openai(captured: dict, *, text: str = "The correct answer is (B)"):
+    class _Resp:
+        choices = [types.SimpleNamespace(message=types.SimpleNamespace(content=text))]
+        usage = types.SimpleNamespace(prompt_tokens=42)
+
+    class _Completions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _Resp()
+
+    class _Chat:
+        def __init__(self):
+            self.completions = _Completions()
+
+    class _Client:
+        def __init__(self):
+            self.chat = _Chat()
+
+    mod = types.ModuleType("openai")
+    mod.OpenAI = _Client
+    return mod
+
+
+@pytest.fixture
+def eval_call_item():
+    return {
+        "question": "q?", "choice_A": "a", "choice_B": "b",
+        "choice_C": "c", "choice_D": "d", "gold": "B",
+    }
+
+
+@pytest.mark.unit
+def test_call_eval_llm_anthropic_uses_low_temperature(monkeypatch, eval_call_item):
+    captured: dict = {}
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(captured))
+    answer, in_tok = call_eval_llm(
+        [{"role": "user", "content": "doc"}],
+        eval_call_item,
+        {"provider": "anthropic", "model": "m", "max_tokens": 16},
+    )
+    assert captured["temperature"] == 0.1
+    assert answer == "B"
+    assert in_tok == 42
+
+
+@pytest.mark.unit
+def test_call_eval_llm_openai_uses_low_temperature(monkeypatch, eval_call_item):
+    captured: dict = {}
+    monkeypatch.setitem(sys.modules, "openai", _fake_openai(captured))
+    answer, in_tok = call_eval_llm(
+        [{"role": "user", "content": "doc"}],
+        eval_call_item,
+        {"provider": "openai", "model": "m", "max_tokens": 16},
+    )
+    assert captured["temperature"] == 0.1
+    assert answer == "B"
+    assert in_tok == 42
+
+
+# ── run_leg: shared eval draw (de-biasing) ──────────────────────────────────
+
+
+@pytest.mark.unit
+def test_run_leg_reuses_eval_for_identical_context(monkeypatch, lb_item):
+    """Leg B reuses Leg A's answer when the eval context is byte-identical —
+    no second judge call, and the reused flag is recorded."""
+    monkeypatch.setattr(
+        harness, "compress_via_shim",
+        lambda messages, url: {"messages": messages, "stats": {}},
+    )
+    calls = {"n": 0}
+
+    def counting_eval(compressed, item, cfg, *, closed_book=False):
+        calls["n"] += 1
+        return ("B", 7)
+
+    monkeypatch.setattr(harness, "call_eval_llm", counting_eval)
+
+    eval_a: dict = {}
+    [rec_a] = run_leg(
+        "A", [lb_item], "http://x", lb_cfg={"provider": "anthropic"}, eval_sink=eval_a
+    )
+    assert calls["n"] == 1
+    assert rec_a["eval_reused"] is False
+    assert eval_a[lb_item["item_id"]]["answer"] == "B"
+
+    # Leg B sees the same compressed messages → identical context → reuse.
+    [rec_b] = run_leg(
+        "B", [lb_item], "http://x", lb_cfg={"provider": "anthropic"}, reuse_eval=eval_a
+    )
+    assert calls["n"] == 1, "judge must not be called again for identical input"
+    assert rec_b["eval_reused"] is True
+    assert rec_b["accuracy"] is True
+    assert rec_b["lb_pred"] == "B"
+    assert rec_b["eval_input_tokens"] == 7
+    assert rec_b["eval_ms"] == 0
+
+
+@pytest.mark.unit
+def test_run_leg_does_not_reuse_when_context_differs(monkeypatch, lb_item):
+    """Genuinely-compressed items (different context) get a fresh draw."""
+    monkeypatch.setattr(
+        harness, "compress_via_shim",
+        lambda messages, url: {"messages": messages, "stats": {}},
+    )
+    calls = {"n": 0}
+
+    def counting_eval(compressed, item, cfg, *, closed_book=False):
+        calls["n"] += 1
+        return ("B", 7)
+
+    monkeypatch.setattr(harness, "call_eval_llm", counting_eval)
+
+    eval_a: dict = {}
+    run_leg("A", [lb_item], "http://x", lb_cfg={"provider": "anthropic"}, eval_sink=eval_a)
+    assert calls["n"] == 1
+
+    # Same item_id but a different (compressed) document → context differs.
+    item_b = {**lb_item, "messages": [{"role": "user", "content": "a much shorter doc"}]}
+    [rec_b] = run_leg(
+        "B", [item_b], "http://x", lb_cfg={"provider": "anthropic"}, reuse_eval=eval_a
+    )
+    assert calls["n"] == 2, "differing context must trigger a fresh judge call"
+    assert rec_b["eval_reused"] is False
+
+
 # ── _percentile ─────────────────────────────────────────────────────────────
 
 
@@ -188,11 +415,16 @@ def test_percentile_median_and_p95():
 
 @pytest.mark.unit
 def test_compute_metrics_sidecar_latency_from_compress_ms():
-    """Sidecar latency must come from compress_ms, NOT end-to-end duration_ms."""
-    records_a = [{"tokens_raw": 100, "tokens_compressed": 80, "accuracy": True}]
+    """Sidecar latency comes from Leg B compress_ms (NOT end-to-end duration_ms);
+    eval-LLM latency comes from Leg A (Leg B reuses identical-input draws at
+    eval_ms=0 under the shared draw, which would read as a ~0ms 'free' judge)."""
+    records_a = [
+        {"tokens_raw": 100, "tokens_compressed": 80, "accuracy": True, "eval_ms": 9000},
+        {"tokens_raw": 100, "tokens_compressed": 80, "accuracy": True, "eval_ms": 12000},
+    ]
     records_b = [
         {"tokens_raw": 100, "tokens_compressed": 50, "accuracy": True,
-         "compress_ms": 300, "eval_ms": 9000, "duration_ms": 9300},
+         "compress_ms": 300, "eval_ms": 0, "duration_ms": 9300},     # reused → 0ms
         {"tokens_raw": 100, "tokens_compressed": 50, "accuracy": True,
          "compress_ms": 400, "eval_ms": 12000, "duration_ms": 12400},
     ]
@@ -200,6 +432,7 @@ def test_compute_metrics_sidecar_latency_from_compress_ms():
     # p50 is in the 300–400 ms range, nowhere near the 9–12 s end-to-end times
     assert metrics["sidecar_p50_ms"] in (300, 400)
     assert metrics["sidecar_p50_ms"] < 1000
+    # eval p50 reflects the real Leg A judge cost (9–12 s), not Leg B's 0ms reuse
     assert metrics["eval_p50_ms"] >= 9000
 
 
