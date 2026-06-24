@@ -1,0 +1,31 @@
+# leanctx prompt-compression sidecar for the InsForge Model Gateway.
+#
+# Run from anywhere (the build context is the repo root, two levels up):
+#   cp integrations/insforge/.env.example integrations/insforge/.env   # optional
+#   docker compose -f integrations/insforge/docker-compose.yml up -d --build
+#
+# InsForge's Model Gateway then POSTs to http://localhost:8459/compress
+# (set LEANCTX_SIDECAR_URL — or InsForge's AI_COMPRESSION_URL — accordingly).
+
+services:
+  leanctx-insforge:
+    build:
+      context: ../..
+      dockerfile: integrations/insforge/Dockerfile
+    image: leanctx-insforge:cpu
+    ports:
+      - "8459:8459"
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8459/health').getcode()==200 else 1)
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
