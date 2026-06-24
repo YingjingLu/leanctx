@@ -37,7 +37,14 @@ export interface CompressOptions {
    * unchanged) — so it's safe to wire in unconditionally and enable via env.
    */
   url?: string;
-  /** Per-request timeout in ms. Default 2000 (this is an inline gateway call). */
+  /**
+   * Per-request timeout in ms. Default 60000. This is an inline gateway call,
+   * but the shipped sidecar runs LLMLingua-2 on CPU where a pass is
+   * multi-second, so a tight budget would make the call time out and fail-open
+   * to the *uncompressed* request — i.e. silently disable compression. A dead
+   * sidecar still fails fast (connection refused), so this only bounds the
+   * reachable-but-slow case. Lower it (e.g. ~2000) only with a GPU sidecar.
+   */
   timeoutMs?: number;
   /**
    * Request-level gate: skip the round-trip when the total string-content
@@ -87,7 +94,7 @@ export async function compressMessages<M extends { role: string; content: unknow
   if (!eligible) return messages;
   if (options.minChars && totalChars < options.minChars) return messages;
 
-  const timeoutMs = options.timeoutMs ?? 2000;
+  const timeoutMs = options.timeoutMs ?? 60000;
   try {
     const resp = await fetch(`${url.replace(/\/+$/, "")}/compress`, {
       method: "POST",

@@ -22,7 +22,7 @@ import { compressMessages } from "@leanctx/insforge-connector";
 
 const out = await compressMessages(messages, {
   // url: "http://localhost:8459",  // default: process.env.LEANCTX_SIDECAR_URL
-  // timeoutMs: 2000,
+  // timeoutMs: 60000,             // CPU sidecar is multi-second; lower only with a GPU sidecar
   // minChars: 6000,                // request-level gate (skip tiny requests)
   // onError: console.warn,
 });
