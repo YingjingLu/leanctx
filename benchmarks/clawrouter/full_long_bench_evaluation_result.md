@@ -1,8 +1,3 @@
-@jia-gao  Updated report with Haiku (mainly want to stay consistent with the benchmark in the README as well as cost saving) that includes breakdown betwen verbatim and lingua compressed cases so that we can isolate the actual saving and accuracy impact on those that are undergoing lingua compresison. This also includes the two changes:
-1. For closed book, we still use prompt to force the LLM to make a selection (this behavior is consistent among all legs)
-2. Removed agent_s1 the baseline single case, focus on the LongBench
-3. Tune the temperature from 1 to 0.1 as it is more suitable for the use case
-
 # ClawRouter × leanctx — Phase 1 Benchmark Report
 
 **Verdict: ✅ PASS**  ·  Date: 2026-06-13 22:18 UTC  ·  LB N=503  ·  Eval: anthropic/claude-haiku-4-5-20251001  ·  CR commit: `89269507`
