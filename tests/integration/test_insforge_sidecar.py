@@ -59,13 +59,19 @@ def test_run_offon_savings_no_api(leanctx_sidecar):
 @pytest.mark.insforge
 def test_dry_run_main_writes_report_without_api(leanctx_sidecar, tmp_path):
     """The --dry-run harness path produces a report + JSONL with no provider
-    calls (sidecar + tiktoken only)."""
+    calls (sidecar + tiktoken only).
+
+    Uses ``--lb-n 0`` (transcript-only): LongBench loading pulls the optional
+    ``datasets`` extra (and would download the dataset), which CI does not
+    install — the transcript workload exercises the same dry-run wiring without
+    that dependency.
+    """
     url, _proc, _lingua_ok = leanctx_sidecar
     out = tmp_path / "r.jsonl"
     report = tmp_path / "r.md"
     rc = bi.main([
         "--upstream", "anthropic", "--dry-run",
-        "--lb-n", "2", "--transcript", "--transcript-episodes", "1",
+        "--lb-n", "0", "--transcript", "--transcript-episodes", "1",
         "--sidecar-url", url,
         "--out", str(out), "--report", str(report),
     ])
