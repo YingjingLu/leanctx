@@ -168,6 +168,16 @@ def test_compute_metrics_default_field_unchanged_for_cr():
     assert m["delta_tokens"] == pytest.approx(0.5)
 
 
+@pytest.mark.unit
+def test_compute_metrics_empty_pool_is_zeroed_not_crash():
+    """An empty aligned pool (e.g. a transcript-only run, transcript excluded)
+    yields zeroed metrics instead of a ZeroDivisionError that discards the run."""
+    m = compute_metrics([], [], token_field="usage_prompt_tokens")
+    assert m["delta_tokens"] == 0.0
+    assert m["tokens_a"] == 0 and m["tokens_b"] == 0
+    assert m["acc_closed_book"] is None
+
+
 # ── run_leg usage-probe path (no network) ───────────────────────────────────
 
 
@@ -224,6 +234,42 @@ def test_format_insforge_report_headline_and_dollars():
     assert "40.0%" in text            # savings
 
 
+@pytest.mark.unit
+def test_report_headline_excludes_transcript():
+    """Transcript still appears (informational) but the headline + gate savings
+    are LongBench-only — never the blended figure (#4/#8). A huge, highly
+    compressible transcript must not drag the headline toward its own ratio."""
+    off = [
+        {"item_id": "lb1", "workload": "lb_if", "tokens_raw": 1000,
+         "usage_prompt_tokens": 1000, "tokens_compressed": 1000, "accuracy": True},
+        {"item_id": "t0", "workload": "transcript", "tokens_raw": 50_000,
+         "usage_prompt_tokens": 50_000, "tokens_compressed": 50_000},
+    ]
+    on = [
+        {"item_id": "lb1", "workload": "lb_if", "tokens_raw": 1000,
+         "usage_prompt_tokens": 600, "tokens_compressed": 600, "accuracy": True},
+        {"item_id": "t0", "workload": "transcript", "tokens_raw": 50_000,
+         "usage_prompt_tokens": 10_000, "tokens_compressed": 10_000},
+    ]
+    # Gate pool = LongBench only (what main()'s _pool now produces).
+    lb_off = [r for r in off if r["workload"] != "transcript"]
+    lb_on = [r for r in on if r["workload"] != "transcript"]
+    mu = compute_metrics(lb_off, lb_on, token_field="usage_prompt_tokens",
+                         input_price_per_token=1e-6)
+    text = bi.format_insforge_report(
+        off, on, [], model="anthropic/claude-haiku-4.5",
+        gate=GateResult(passed=True), metrics_usage=mu, metrics_tiktoken=mu,
+        verbatim_metrics=None, direct=True, dry_run=False,
+        savings_threshold=0.20, accuracy_drop=0.02,
+    )
+    assert "LongBench (gated)" in text
+    assert "excluded from gate" in text
+    assert "40.0%" in text   # LongBench-only headline (1000 -> 600)
+    assert "80.0%" in text   # transcript's own ratio, informational row only
+    # the blended figure (≈79.2%) must never be the headline
+    assert "79.2%" not in text
+
+
 # ── InsForge gateway client + bootstrap (mocked HTTP) ───────────────────────
 
 
@@ -268,6 +314,27 @@ def test_insforge_chat_call_reads_metadata_usage(monkeypatch):
     assert captured["url"].endswith("/api/ai/chat/completion")
     assert captured["body"]["maxTokens"] == 64  # camelCase, not max_tokens
     assert captured["auth"] == "Bearer JWT123"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"text": "ok", "metadata": {}},                          # usage absent
+        {"text": "ok", "metadata": {"usage": {}}},               # promptTokens absent
+        {"text": "ok", "metadata": {"usage": {"promptTokens": 0}}},  # 0 (impossible)
+    ],
+)
+def test_insforge_chat_call_raises_on_unusable_usage(monkeypatch, payload):
+    """A missing/0 prompt-token count must fail loudly, not be coerced to 0 —
+    coercion silently inflated the OFF/ON savings headline (#3)."""
+    import httpx
+
+    from benchmarks.common.runner import _insforge_chat_call
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeResp(200, payload))
+    with pytest.raises(RuntimeError, match="promptTokens"):
+        _insforge_chat_call("p", "m", 64, base_url="http://x", api_key="k")
 
 
 @pytest.mark.unit

@@ -32,6 +32,7 @@ from benchmarks.common.scoring import GateResult, _percentile, apply_gate, compu
 from benchmarks.common.verbatim import (
     acc_by_route,
     aggregate_verbatim_metrics,
+    validate_run_invariants,
     verbatim_split_by_item,
     write_by_item_dumps,
 )
@@ -446,11 +447,17 @@ def format_insforge_report(
     lb_on = [r for r in on if r.get("accuracy") is not None]
     tx_off = [r for r in off if r.get("workload") == "transcript"]
     tx_on = [r for r in on if r.get("workload") == "transcript"]
+    # Per-request cost basis: the gated (non-transcript) item count.
+    n_gated = len([r for r in off if r.get("workload") != "transcript"])
 
-    usage_off = _sum(off, "usage_prompt_tokens")
-    usage_on = _sum(on, "usage_prompt_tokens")
+    # Headline savings is derived from metrics_usage — the SAME transcript-excluded,
+    # aligned pool the gate runs on — so the headline and the Go/No-Go verdict can
+    # never be computed from different populations. tokens_a/tokens_b are that
+    # pool's OFF/ON token sums (usage.prompt_tokens live; tiktoken under --dry-run).
+    usage_off = int(metrics_usage.get("tokens_a", 0))
+    usage_on = int(metrics_usage.get("tokens_b", 0))
     usage_saved = usage_off - usage_on
-    usage_savings = usage_saved / usage_off if usage_off else 0.0
+    usage_savings = metrics_usage.get("delta_tokens", 0.0)
     dollars = pricing.dollars_saved(usage_off, usage_on, model)
 
     acc_off = metrics_usage.get("acc_a", 0.0)
@@ -486,16 +493,19 @@ def format_insforge_report(
     A("")
     A("| Source | Leg OFF | Leg ON | Saved | Savings |")
     A("|---|---|---|---|---|")
-    A(f"| **All items** | {usage_off:,} | {usage_on:,} | {usage_saved:,} | {pct(usage_savings)} |")
-    if lb_off:
-        lo, ln = _sum(lb_off, "usage_prompt_tokens"), _sum(lb_on, "usage_prompt_tokens")
-        A(f"| LongBench ({len(lb_off)}) | {lo:,} | {ln:,} | {lo-ln:,} | "
-          f"{pct((lo-ln)/lo) if lo else 'N/A'} |")
+    A(f"| **LongBench (gated)** | {usage_off:,} | {usage_on:,} | {usage_saved:,} | "
+      f"{pct(usage_savings)} |")
     if tx_off:
         to, tn = _sum(tx_off, "usage_prompt_tokens"), _sum(tx_on, "usage_prompt_tokens")
-        A(f"| Transcript ({len(tx_off)}) | {to:,} | {tn:,} | {to-tn:,} | "
-          f"{pct((to-tn)/to) if to else 'N/A'} |")
+        A(f"| _Transcript ({len(tx_off)}) — informational, excluded from gate_ | "
+          f"{to:,} | {tn:,} | {to-tn:,} | {pct((to-tn)/to) if to else 'N/A'} |")
     A("")
+    if tx_off:
+        A("_The transcript (coding-agent) workload still runs and is recorded, but "
+          "is **excluded** from the headline and the Go/No-Go gate: its token "
+          "profile differs sharply from LongBench, so blending the two would let "
+          "the verdict turn on workload mix rather than compression quality._")
+        A("")
     price_mtok = (pricing.input_price_per_token(model) or 0) * 1e6
     A(f"**Dollars saved** (at {model} = ${price_mtok:.2f}/Mtok input): "
       f"**${dollars:,.4f}** over this run (pinned {pricing.PINNED_DATE})."
@@ -668,7 +678,7 @@ def format_insforge_report(
         A(f"Tokens saved     = {usage_saved:,}")
         A(f"Cost saved       = ${dollars:,.4f} over this run")
         if usage_off:
-            per_1k = (usage_saved / max(len(off), 1)) * (price_mtok / 1e6) * 1000
+            per_1k = (usage_saved / max(n_gated, 1)) * (price_mtok / 1e6) * 1000
             A(f"                 = ${per_1k:,.2f} per 1,000 requests")
         A("```")
     else:
@@ -820,10 +830,25 @@ def main(argv: list[str] | None = None) -> int:
     # ── metrics ─────────────────────────────────────────────────────────
     price = pricing.input_price_per_token(args.model, price_table) or 15 / 1e6
     token_field = "tokens_compressed" if args.dry_run else "usage_prompt_tokens"
-    # align: only items present (with the token field) in both legs
+    # The transcript is a savings-only sidecar workload: it still runs (its
+    # records land in the JSONL and an informational report row), but it is
+    # excluded from the gate/headline metric pool so the verdict reflects the
+    # LongBench workload alone and never blends two populations with very
+    # different compressibility. Mirrors ClawRouter's _METRIC_EXCLUDE.
+    _METRIC_EXCLUDE = {"transcript"}
+
+    # align: only items present in both legs with the token field AND a non-zero
+    # compressed count — a 0-token item (sidecar fail-open / empty usage) would
+    # otherwise skew the savings denominator — and not in the excluded pool.
     def _pool(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        return {r["item_id"]: r for r in records
-                if r.get("item_id") and r.get(token_field) is not None}
+        return {
+            r["item_id"]: r
+            for r in records
+            if r.get("item_id")
+            and r.get(token_field) is not None
+            and r.get("tokens_compressed", 0) > 0
+            and r.get("workload") not in _METRIC_EXCLUDE
+        }
     off_by, on_by = _pool(off), _pool(on)
     shared = sorted(set(off_by) & set(on_by))
     off_a = [off_by[i] for i in shared]
@@ -863,6 +888,23 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\n" + report)
     print(f"\n[out] JSONL → {args.out}\n[out] report → {args.report}")
+
+    # Methodology self-checks run LAST, after every artifact is on disk, so a
+    # violation is surfaced loudly (exit 3) without discarding the run's output.
+    # In gateway mode the records carry no lx_route/eval_reused, so both checks
+    # short-circuit to no-ops; in direct mode they pin the "verbatim Δ=0" and
+    # headline-vs-by-route parity guarantees the report relies on.
+    try:
+        validate_run_invariants(off, on)
+    except AssertionError as exc:
+        print(
+            "\n[INVALID] methodology self-check failed — the run's metrics are "
+            "untrustworthy, but all artifacts above were still written:\n"
+            f"{exc}",
+            flush=True,
+        )
+        return 3
+
     return 0 if gate.passed else 1
 
 

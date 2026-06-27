@@ -2,8 +2,11 @@
 
 Benchmarks leanctx prompt compression on **InsForge's** chat path with compression **off vs on**:
 
-- **(a) LongBench v2** — accuracy (does compression preserve answer quality?)
-- **(b) a coding-agent transcript** — token savings (optional; off by default)
+- **(a) LongBench v2** — accuracy (does compression preserve answer quality?), and the
+  workload the headline savings + Go/No-Go gate are computed on
+- **(b) a coding-agent transcript** — token savings (optional; off by default). It still runs
+  and is recorded, but is **informational only**: it is *excluded* from the gate/headline so the
+  verdict never blends two workloads with very different compressibility
 
 It reports savings on **InsForge's own `usage.prompt_tokens`** and dollars via **OpenRouter pricing**,
 reusing the provider-agnostic core in `benchmarks/common/` (the same scorer/LongBench/verbatim/report
@@ -92,7 +95,7 @@ python -m benchmarks.insforge.bench_insforge --upstream insforge \
 | `--upstream {insforge,openrouter,anthropic,openai}` | `insforge` | Routing mode (see table above). |
 | `--model MODEL` | `anthropic/claude-haiku-4.5` | OpenRouter/InsForge model slug, or provider-native id for `--upstream anthropic` (e.g. `claude-haiku-4-5-20251001`). |
 | `--lb-n N` | `10` | Number of LongBench v2 questions. `0` disables LongBench. Full set = `503`. |
-| `--transcript` | off | Also run the coding-agent transcript savings workload. |
+| `--transcript` | off | Also run the coding-agent transcript savings workload (informational; **excluded** from the headline + gate). |
 | `--transcript-source S` | `agent_extended` | `agent_extended` (shipped) or a path to a SWE-bench `.traj`/`.json`. |
 | `--transcript-episodes N` | `1` | Split the transcript into N contiguous items (1 = one full-context item). |
 | `--transcript-turns N` | none | Cap the transcript to the first N messages. |
@@ -115,7 +118,8 @@ python -m benchmarks.insforge.bench_insforge --upstream insforge \
 | `--out PATH` | `./insforge_results.jsonl` | Per-record JSONL output. |
 | `--report PATH` | `./insforge_report.md` | Markdown report output. |
 
-Exit code: `0` = PASS, `1` = NO-GO (gate failed), `2` = fatal (e.g. tiktoken missing).
+Exit code: `0` = PASS, `1` = NO-GO (gate failed), `2` = fatal (e.g. tiktoken missing),
+`3` = methodology self-check failed (artifacts still written; metrics untrustworthy).
 
 ---
 

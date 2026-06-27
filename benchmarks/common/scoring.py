@@ -41,7 +41,29 @@ def compute_metrics(
     ``"usage_prompt_tokens"`` (the provider's own ``usage.prompt_tokens``).
     ``input_price_per_token`` sets the cost model (default $15/1M = Sonnet; pass
     the model's OpenRouter price for InsForge).
+
+    An empty aligned pool (e.g. a transcript-only run, since the transcript is
+    excluded from the metric pool, or every item dropped) yields a zeroed metric
+    dict rather than a ``ZeroDivisionError`` that would discard a finished run.
     """
+    if not records_a or not records_b:
+        return {
+            "delta_tokens": 0.0,
+            "delta_accuracy": 0.0,
+            "e2e_ratio": 0.0,
+            "cr_savings": 0.0,
+            "cost_saved_per_1k": 0.0,
+            "sidecar_p50_ms": None,
+            "sidecar_p95_ms": None,
+            "eval_p50_ms": None,
+            "eval_p95_ms": None,
+            "tokens_a": 0,
+            "tokens_b": 0,
+            "acc_a": 0.0,
+            "acc_b": 0.0,
+            "acc_closed_book": None,
+        }
+
     tokens_a = sum(r[token_field] for r in records_a)
     tokens_b = sum(r[token_field] for r in records_b)
 

@@ -62,6 +62,35 @@ _EVAL_TEMPERATURE = 0.1
 _OPENAI_COMPATIBLE = frozenset({"openai", "openrouter"})
 
 
+def _insforge_prompt_tokens(data: Any) -> int:
+    """Extract InsForge's ``usage.promptTokens`` — the *only* savings instrument
+    in gateway mode — raising loudly if it is absent or non-positive.
+
+    A real prompt is never 0 tokens, so a missing/0 count means the response
+    shape changed (envelope drift, ``response.usage`` omitted on a cache hit,
+    etc.), not "free compression". Coercing it to 0 silently inflated the
+    OFF/ON savings headline; we fail the run instead so the number is never
+    quietly wrong.
+    """
+    payload = data.get("data", data) if isinstance(data, dict) else {}
+    usage = (payload.get("metadata") or {}).get("usage") or {}
+    raw = usage.get("promptTokens")
+    if raw is None:
+        keys = sorted(data) if isinstance(data, dict) else type(data).__name__
+        raise RuntimeError(
+            "InsForge response missing metadata.usage.promptTokens — cannot "
+            f"measure savings (top-level keys: {keys}). Response shape may have "
+            "drifted from the pinned ref; re-check the gateway schema."
+        )
+    tok = int(raw)
+    if tok <= 0:
+        raise RuntimeError(
+            f"InsForge reported promptTokens={tok}; refusing to record a "
+            "0-token prompt as free compression (would inflate the savings)."
+        )
+    return tok
+
+
 def _insforge_chat_call(
     prompt: str,
     model: str,
@@ -97,8 +126,7 @@ def _insforge_chat_call(
     # successResponse() sends the result directly; tolerate a {data:...} wrapper too.
     payload = data.get("data", data) if isinstance(data, dict) else {}
     text = payload.get("text", "") or ""
-    usage = (payload.get("metadata") or {}).get("usage") or {}
-    in_tok = int(usage.get("promptTokens") or 0)
+    in_tok = _insforge_prompt_tokens(data)
     return text, in_tok
 
 
@@ -242,10 +270,7 @@ def usage_probe_llm(messages: list[dict], probe_cfg: dict) -> int:
                     timeout=180,
                 )
                 r.raise_for_status()
-                d = r.json()
-                payload = d.get("data", d) if isinstance(d, dict) else {}
-                usage = (payload.get("metadata") or {}).get("usage") or {}
-                return int(usage.get("promptTokens") or 0)
+                return _insforge_prompt_tokens(r.json())
             if provider in _OPENAI_COMPATIBLE:
                 import openai
 
