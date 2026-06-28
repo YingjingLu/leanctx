@@ -52,6 +52,14 @@ def _verbatim_split_item(
     eligible_tokens = sum(_sum_tokens([msgs_a[i]]) for i in eligible)
     request_compressible = eligible_tokens >= threshold
 
+    # Content types the default router sends to the lingua pass: prose at the
+    # standard ratio, structured data (JSON/dialogue logs) at the gentler
+    # ``structured_ratio`` (middleware auto-route). Both are *compressed* — they
+    # must mirror the sidecar here or the route label drifts from the real
+    # routing and the route/reuse invariant trips (which is exactly what a new
+    # ContentType silently omitted from this set would do).
+    _COMPRESSED_TYPES = (ContentType.PROSE, ContentType.STRUCTURED)
+
     verbatim = comp_in = comp_out = 0
     n_compressed = 0
     for i, (ma, mb) in enumerate(zip(msgs_a, msgs_b, strict=True)):
@@ -59,7 +67,7 @@ def _verbatim_split_item(
         is_compressed = (
             request_compressible
             and i in eligible
-            and classify(ma) is ContentType.PROSE
+            and classify(ma) in _COMPRESSED_TYPES
         )
         if is_compressed:
             comp_in += ta
