@@ -6,6 +6,7 @@ the usage-probe run_leg path, and the report renderer.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -381,3 +382,63 @@ def test_format_insforge_report_marks_dry_run():
         savings_threshold=0.20, accuracy_drop=0.02,
     )
     assert "DRY RUN" in text
+
+
+# ── significance gate + offline rescore ──────────────────────────────────────
+
+
+def _paired_lb_records(pairs: list[tuple[bool, bool]]) -> tuple[list, list]:
+    """Build aligned OFF/ON LongBench record lists from (off, on) correctness."""
+    off, on = [], []
+    for i, (a, b) in enumerate(pairs):
+        iid = f"i{i}"
+        off.append({"item_id": iid, "workload": "lb_if", "leg": "OFF",
+                    "tokens_raw": 1000, "usage_prompt_tokens": 1000,
+                    "tokens_compressed": 1000, "accuracy": a})
+        on.append({"item_id": iid, "workload": "lb_if", "leg": "ON",
+                   "tokens_raw": 1000, "usage_prompt_tokens": 700,
+                   "tokens_compressed": 700, "accuracy": b,
+                   "lx_route": "lingua", "lx_verbatim_tokens": 0,
+                   "lx_compressed_in_tokens": 1000, "lx_compressed_out_tokens": 700})
+    return off, on
+
+
+@pytest.mark.unit
+def test_report_shows_mcnemar_ci_and_within_noise():
+    # Small within-noise drop: 3 regressions vs 2 improvements ⇒ not significant.
+    pairs = [(True, True)] * 20 + [(False, False)] * 20 \
+        + [(True, False)] * 3 + [(False, True)] * 2
+    off, on = _paired_lb_records(pairs)
+    mu = compute_metrics(off, on, token_field="usage_prompt_tokens",
+                         input_price_per_token=1e-6)
+    text = bi.format_insforge_report(
+        off, on, [], model="anthropic/claude-haiku-4.5",
+        gate=GateResult(passed=True), metrics_usage=mu, metrics_tiktoken=mu,
+        verbatim_metrics=None, direct=True, dry_run=False,
+        savings_threshold=0.20, accuracy_drop=0.02,
+    )
+    assert "McNemar" in text
+    assert "95% CI" in text
+    assert "within run-to-run noise" in text
+
+
+@pytest.mark.unit
+def test_rescore_from_jsonl_round_trips_and_gates_go(tmp_path):
+    # A within-noise run written to JSONL re-renders to GO with no provider call.
+    pairs = [(True, True)] * 30 + [(False, False)] * 30 \
+        + [(True, False)] * 4 + [(False, True)] * 3
+    off, on = _paired_lb_records(pairs)
+    jsonl = tmp_path / "results.jsonl"
+    with jsonl.open("w") as f:
+        for r in off + on:
+            f.write(json.dumps(r) + "\n")
+
+    report, gate = bi.rescore_from_jsonl(
+        jsonl, model="anthropic/claude-haiku-4.5",
+        savings_threshold=0.20, accuracy_drop=0.02,
+    )
+    assert gate.passed is True               # CI upper bound above −2%
+    assert "McNemar" in report
+    assert "30.0%" in report                 # savings rendered (1000 → 700)
+    # §2b reconstructed from the saved lx_* fields (no raw messages needed).
+    assert "Excluding Verbatim" in report

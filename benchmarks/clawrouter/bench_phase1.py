@@ -39,6 +39,7 @@ from benchmarks.common.scoring import (
     _percentile,
     apply_gate,
     compute_metrics,
+    mcnemar_paired,
 )
 from benchmarks.common.tokens import _sum_tokens
 from benchmarks.common.verbatim import (
@@ -83,6 +84,7 @@ __all__ = [
     "compute_metrics",
     "format_report",
     "health_check",
+    "mcnemar_paired",
     "run_leg",
     "setup_clawrouter",
     "spawn_cr_shim",

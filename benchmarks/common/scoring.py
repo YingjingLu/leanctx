@@ -5,7 +5,9 @@ Provider-agnostic: ``compute_metrics`` aggregates per-item records (token counts
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from statistics import NormalDist
 from typing import Any
 
 
@@ -13,6 +15,70 @@ from typing import Any
 class GateResult:
     passed: bool
     fail_reason: str = ""
+
+
+def mcnemar_paired(
+    pairs: list[tuple[bool, bool]], *, confidence: float = 0.95
+) -> dict[str, Any]:
+    """Paired McNemar test + accuracy-diff CI from per-item OFF/ON correctness.
+
+    ``pairs`` are ``(off_correct, on_correct)`` booleans for the **same** items
+    scored on both legs — exactly the aligned per-item records the harness
+    already saves, so this never needs a fresh LLM call. The test conditions on
+    the *discordant* pairs only (one leg right, the other wrong); concordant
+    pairs carry no signal about a difference and drop out.
+
+    Returns:
+      ``delta``        accuracy difference ON − OFF (= (b01 − b10) / n)
+      ``ci_lo/ci_hi``  Wald CI on that paired difference at ``confidence``
+      ``p_value``      *exact* two-sided binomial McNemar p over discordant pairs
+      ``z``            signed normal approx (negative ⇒ ON worse); diagnostic only
+      ``b10``          regressions: OFF correct → ON wrong
+      ``b01``          improvements: OFF wrong → ON correct
+      ``n_discordant`` b01 + b10
+      ``n``            total paired items
+
+    Conservative by construction: an empty or fully-concordant sample yields
+    ``p_value=1.0`` and a degenerate (zero-width) CI, so a significance-based
+    gate can never *fail* on no evidence.
+    """
+    n = len(pairs)
+    b10 = sum(1 for off, on in pairs if off and not on)  # regression
+    b01 = sum(1 for off, on in pairs if on and not off)  # improvement
+    n_disc = b01 + b10
+    delta = (b01 - b10) / n if n else 0.0
+
+    # Exact two-sided McNemar: discordant outcomes are Binomial(n_disc, 0.5)
+    # under H0. Two-sided p = 2·P(X ≤ min(b01, b10)), capped at 1.
+    if n_disc == 0:
+        p_value = 1.0
+    else:
+        k = min(b01, b10)
+        tail = sum(math.comb(n_disc, i) for i in range(k + 1)) / (2 ** n_disc)
+        p_value = min(2.0 * tail, 1.0)
+
+    z = (b01 - b10) / math.sqrt(n_disc) if n_disc else 0.0
+
+    # Wald CI on the paired difference of proportions. Var of (b01 − b10)/n is
+    # (b01 + b10 − (b01 − b10)²/n) / n²; degenerates to 0 when n or n_disc is 0.
+    if n and n_disc:
+        var = (n_disc - (b01 - b10) ** 2 / n) / n ** 2
+        se = math.sqrt(max(var, 0.0))
+    else:
+        se = 0.0
+    z_crit = NormalDist().inv_cdf((1 + confidence) / 2)
+    return {
+        "delta": delta,
+        "ci_lo": delta - z_crit * se,
+        "ci_hi": delta + z_crit * se,
+        "p_value": p_value,
+        "z": z,
+        "b10": b10,
+        "b01": b01,
+        "n_discordant": n_disc,
+        "n": n,
+        "confidence": confidence,
+    }
 
 
 def _percentile(values: list[float], q: float) -> float | None:
@@ -62,6 +128,7 @@ def compute_metrics(
             "acc_a": 0.0,
             "acc_b": 0.0,
             "acc_closed_book": None,
+            "accuracy_sig": mcnemar_paired([]),
         }
 
     tokens_a = sum(r[token_field] for r in records_a)
@@ -80,6 +147,27 @@ def compute_metrics(
     acc_a = sum(acc_a_vals) / len(acc_a_vals) if acc_a_vals else 0.0
     acc_b = sum(acc_b_vals) / len(acc_b_vals) if acc_b_vals else 0.0
     delta_accuracy = acc_b - acc_a
+
+    # Paired significance: same items run OFF and ON, so the accuracy delta is a
+    # *paired* comparison, not two independent samples. Align by item_id and run
+    # McNemar over the per-item (off, on) correctness — this is what lets the
+    # gate tell a real regression from run-to-run noise. Falls back gracefully
+    # (empty → p=1.0) when records carry no item_id (e.g. unit fixtures).
+    a_by_id = {
+        r["item_id"]: r
+        for r in records_a
+        if r.get("item_id") and r.get("accuracy") is not None
+    }
+    b_by_id = {
+        r["item_id"]: r
+        for r in records_b
+        if r.get("item_id") and r.get("accuracy") is not None
+    }
+    pairs = [
+        (bool(a_by_id[i]["accuracy"]), bool(b_by_id[i]["accuracy"]))
+        for i in a_by_id.keys() & b_by_id.keys()
+    ]
+    accuracy_sig = mcnemar_paired(pairs)
 
     # Closed-book control: accuracy when the model answers from priors alone.
     # If Leg A/B accuracy is at or below this, the context did no work and the
@@ -124,6 +212,7 @@ def compute_metrics(
         "acc_a": acc_a,
         "acc_b": acc_b,
         "acc_closed_book": acc_closed_book,
+        "accuracy_sig": accuracy_sig,
     }
 
 
@@ -140,7 +229,28 @@ def apply_gate(
                 f"savings delta {metrics['delta_tokens']:.4f} below threshold {savings_threshold}"
             ),
         )
-    if metrics["delta_accuracy"] < -accuracy_drop:
+
+    # Accuracy gate — significance-based when per-item pairs are available.
+    # A ±tolerance threshold on the point estimate alone flips GO/NO-GO on
+    # run-to-run noise (the eval's own SE over N=503 is ~1 tolerance). Instead,
+    # fail only when the regression is significant *beyond* tolerance — i.e.
+    # even the optimistic edge of the 95% CI sits below −tolerance. A point
+    # estimate that dips under −tolerance but whose CI still reaches above it is
+    # within noise and passes. Falls back to the point-estimate rule when no
+    # paired stats are present (e.g. hand-built metrics dicts in unit tests).
+    sig = metrics.get("accuracy_sig")
+    if sig is not None:
+        if sig["ci_hi"] < -accuracy_drop:
+            return GateResult(
+                passed=False,
+                fail_reason=(
+                    f"accuracy regression significant beyond tolerance: Δ "
+                    f"{sig['delta']:+.4f} (95% CI [{sig['ci_lo']:+.4f}, "
+                    f"{sig['ci_hi']:+.4f}], McNemar p={sig['p_value']:.4f}); "
+                    f"CI upper bound below allowed −{accuracy_drop}"
+                ),
+            )
+    elif metrics["delta_accuracy"] < -accuracy_drop:
         return GateResult(
             passed=False,
             fail_reason=(
