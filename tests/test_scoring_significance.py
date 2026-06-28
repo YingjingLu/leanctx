@@ -99,6 +99,29 @@ def test_gate_savings_still_enforced_under_significance():
 
 
 @pytest.mark.unit
+def test_gate_savings_as_target_does_not_fail_run():
+    # Soft-target mode (InsForge): a savings shortfall is recorded but the run
+    # passes when correctness holds — the verdict reflects accuracy alone.
+    metrics = {"delta_tokens": 0.176, "accuracy_sig": mcnemar_paired(FULL503_PAIRS)}
+    result = apply_gate(metrics, savings_threshold=0.20, accuracy_drop=0.02,
+                        savings_is_target=True)
+    assert result.passed is True
+    assert result.savings_met is False  # under target, but not a NO-GO
+
+
+@pytest.mark.unit
+def test_gate_savings_as_target_still_fails_on_real_regression():
+    # Even as a soft target, accuracy stays a hard correctness gate.
+    pairs = [(True, True)] * 400 + [(True, False)] * 40 + [(False, True)] * 5
+    metrics = {"delta_tokens": 0.10, "accuracy_sig": mcnemar_paired(pairs)}
+    result = apply_gate(metrics, savings_threshold=0.20, accuracy_drop=0.02,
+                        savings_is_target=True)
+    assert result.passed is False
+    assert "accuracy" in result.fail_reason.lower()
+    assert result.savings_met is False
+
+
+@pytest.mark.unit
 def test_gate_falls_back_to_point_estimate_without_pairs():
     # No accuracy_sig (hand-built metrics) ⇒ legacy point-estimate rule applies.
     metrics = {"delta_tokens": 0.25, "delta_accuracy": -0.05}

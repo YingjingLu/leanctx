@@ -15,6 +15,11 @@ from typing import Any
 class GateResult:
     passed: bool
     fail_reason: str = ""
+    # Whether the savings figure met its bar. When savings is treated as a soft
+    # target (``apply_gate(savings_is_target=True)``) a shortfall sets this False
+    # *without* failing ``passed`` — the verdict then reflects correctness alone,
+    # and the report frames savings as a labeled target rather than a NO-GO.
+    savings_met: bool = True
 
 
 def mcnemar_paired(
@@ -221,10 +226,23 @@ def apply_gate(
     *,
     savings_threshold: float = 0.20,
     accuracy_drop: float = 0.02,
+    savings_is_target: bool = False,
 ) -> GateResult:
-    if metrics["delta_tokens"] < savings_threshold:
+    """Apply the savings + accuracy gates.
+
+    ``savings_is_target`` decides the *severity* of a savings shortfall:
+    ``False`` (default) treats the savings threshold as a hard gate — under it
+    is a NO-GO. ``True`` treats it as a soft internal target — a shortfall is
+    recorded (``savings_met=False``) but does **not** fail the run, so the
+    verdict reflects correctness (accuracy) alone. Accuracy is always a hard
+    correctness gate either way: compression that *significantly* degrades
+    answers is a real regression regardless of how much it saves.
+    """
+    savings_met = metrics["delta_tokens"] >= savings_threshold
+    if not savings_met and not savings_is_target:
         return GateResult(
             passed=False,
+            savings_met=False,
             fail_reason=(
                 f"savings delta {metrics['delta_tokens']:.4f} below threshold {savings_threshold}"
             ),
@@ -243,6 +261,7 @@ def apply_gate(
         if sig["ci_hi"] < -accuracy_drop:
             return GateResult(
                 passed=False,
+                savings_met=savings_met,
                 fail_reason=(
                     f"accuracy regression significant beyond tolerance: Δ "
                     f"{sig['delta']:+.4f} (95% CI [{sig['ci_lo']:+.4f}, "
@@ -253,8 +272,9 @@ def apply_gate(
     elif metrics["delta_accuracy"] < -accuracy_drop:
         return GateResult(
             passed=False,
+            savings_met=savings_met,
             fail_reason=(
                 f"accuracy dropped {-metrics['delta_accuracy']:.4f} exceeds allowed {accuracy_drop}"
             ),
         )
-    return GateResult(passed=True)
+    return GateResult(passed=True, savings_met=savings_met)

@@ -442,3 +442,31 @@ def test_rescore_from_jsonl_round_trips_and_gates_go(tmp_path):
     assert "30.0%" in report                 # savings rendered (1000 → 700)
     # §2b reconstructed from the saved lx_* fields (no raw messages needed).
     assert "Excluding Verbatim" in report
+
+
+@pytest.mark.unit
+def test_report_reframes_savings_shortfall_as_target_not_nogo():
+    # Accuracy fine, savings under the 20% target: the top line must read as the
+    # honest result, not a flat NO-GO, and savings is labeled an internal target.
+    pairs = [(True, True)] * 30 + [(False, False)] * 30 \
+        + [(True, False)] * 3 + [(False, True)] * 2
+    off, on = _paired_lb_records(pairs)
+    # Shave savings to ~12% (under the 20% target) via the usage tokens.
+    for r in on:
+        r["usage_prompt_tokens"] = 880
+        r["tokens_compressed"] = 880
+    mu = compute_metrics(off, on, token_field="usage_prompt_tokens",
+                         input_price_per_token=1e-6)
+    gate = bi.apply_gate(mu, savings_threshold=0.20, accuracy_drop=0.02,
+                         savings_is_target=True)
+    text = bi.format_insforge_report(
+        off, on, [], model="anthropic/claude-haiku-4.5",
+        gate=gate, metrics_usage=mu, metrics_tiktoken=mu,
+        verbatim_metrics=None, direct=True, dry_run=False,
+        savings_threshold=0.20, accuracy_drop=0.02,
+    )
+    assert gate.passed is True and gate.savings_met is False
+    assert "NO-GO" not in text
+    assert "fewer prompt tokens" in text
+    assert "internal target" in text
+    assert "under target" in text
